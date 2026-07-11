@@ -1,0 +1,229 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #FAFAF8;
+  --bg-secondary: #FFFFFF;
+  --bg-tertiary: #F2F2EE;
+  --text-primary: #1C1C1E;
+  --text-secondary: #6E6E73;
+  --text-tertiary: #AEAEB2;
+  --border-color: #E5E5E0;
+  --card-shadow: 0 2px 16px rgba(0, 0, 0, 0.04), 0 1px 4px rgba(0, 0, 0, 0.02);
+  --card-shadow-hover: 0 4px 24px rgba(0, 0, 0, 0.08), 0 1px 8px rgba(0, 0, 0, 0.04);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
+  /* Glass tab bar */
+  --bg-secondary-rgb: 255, 255, 255;
+  --border-color-rgb: 229, 229, 224;
+}
+
+.dark {
+  --bg-primary: #0F0F10;
+  --bg-secondary: #1C1C1E;
+  --bg-tertiary: #2C2C2E;
+  --text-primary: #F5F5F0;
+  --text-secondary: #98989D;
+  --text-tertiary: #636366;
+  --border-color: #38383A;
+  --card-shadow: 0 2px 16px rgba(0, 0, 0, 0.2), 0 1px 4px rgba(0, 0, 0, 0.1);
+  --card-shadow-hover: 0 4px 24px rgba(0, 0, 0, 0.3), 0 1px 8px rgba(0, 0, 0, 0.15);
+  --bg-secondary-rgb: 28, 28, 30;
+  --border-color-rgb: 56, 56, 58;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior: none;
+  padding-top: var(--safe-top);
+  padding-bottom: var(--safe-bottom);
+}
+
+@supports (font: -apple-system-body) {
+  body {
+    font: -apple-system-body;
+  }
+}
+
+/* PWA target: iPhone notch/island safe area */
+.safe-top { padding-top: var(--safe-top); }
+.safe-bottom { padding-bottom: var(--safe-bottom); }
+
+/* iOS-like card */
+.card {
+  background: var(--bg-secondary);
+  border-radius: 16px;
+  box-shadow: var(--card-shadow);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.card:active {
+  transform: scale(0.98);
+}
+
+.card-hover:hover {
+  box-shadow: var(--card-shadow-hover);
+}
+
+/* iOS-style bottom tab bar */
+.tab-bar {
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Status pill */
+.pill {
+  @apply px-3 py-1 rounded-full text-xs font-semibold inline-flex items-center gap-1.5;
+}
+
+/* Delay ring base */
+.delay-ring {
+  transition: stroke-dashoffset 0.8s ease-out;
+}
+
+/* iOS springy page transition */
+.page-enter {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.page-enter-active {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 280ms ease-out, transform 280ms ease-out;
+}
+
+/* Pull to refresh indicator */
+.ptr-indicator {
+  transition: transform 0.2s ease;
+}
+
+/* Countdown digit animation */
+.countdown-digit {
+  display: inline-block;
+  transition: opacity 200ms ease, transform 200ms ease;
+}
+
+.countdown-digit-exit {
+  opacity: 0;
+  transform: translateY(-50%);
+}
+
+.countdown-digit-enter {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: 4px;
+}
+
+/* Skeleton loading shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-tertiary) 25%, var(--bg-secondary) 50%, var(--bg-tertiary) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+
+/* MapLibre overrides */
+.maplibregl-map {
+  border-radius: 16px;
+}
+
+/* iOS-style search input */
+.search-field {
+  background: var(--bg-tertiary);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 17px;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.search-field:focus {
+  border-color: #007AFF;
+}
+
+.search-field::placeholder {
+  color: var(--text-tertiary);
+}
+
+/* Switch/toggle */
+.toggle {
+  @apply relative inline-flex h-7 w-11 items-center rounded-full cursor-pointer transition-colors duration-200;
+}
+
+.toggle-thumb {
+  @apply inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform duration-200;
+}
+
+/* Form select */
+.form-select {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-size: 17px;
+  color: var(--text-primary);
+  outline: none;
+  appearance: none;
+  width: 100%;
+}
+
+/* iOS bottom sheet */
+.bottom-sheet {
+  background: var(--bg-secondary);
+  border-radius: 20px 20px 0 0;
+  box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.12);
+  padding-bottom: var(--safe-bottom);
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+@keyframes pulse-border {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+}
+
+.pulse-border {
+  animation: pulse-border 2s infinite;
+}
