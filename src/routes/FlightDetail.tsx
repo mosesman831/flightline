@@ -6,6 +6,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import {
   ArrowLeft,
   ShareNetwork,
+  ArrowsClockwise,
   Clock,
   Suitcase,
   Note,
@@ -19,9 +20,15 @@ import {
   FileText,
   ArrowRight,
   IdentificationBadge,
+  Wind,
+  Eye,
+  Thermometer,
 } from '@phosphor-icons/react';
 import { toPng } from 'html-to-image';
-import type { Flight } from '../types/flight';
+import type { Flight, LivePosition } from '../types/flight';
+import { greatCircleKm } from '../utils/geo';
+import { refreshFlight, refreshPosition, POSITION_INTERVAL_MS } from '../utils/refresh';
+import { fetchWeather, type ApiWeather } from '../utils/api';
 import AirlineLogo from '../components/AirlineLogo';
 import StatusPill from '../components/StatusPill';
 import Countdown from '../components/Countdown';
@@ -86,11 +93,86 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
   const [flight, setFlight] = useState<Flight | undefined>(() => flights.find((f) => f.id === id));
   const [seeMore, setSeeMore] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [refreshState, setRefreshState] = useState<'idle' | 'refreshing' | 'fresh' | 'stale' | 'failed'>('idle');
+  const [originWeather, setOriginWeather] = useState<ApiWeather | null>(null);
+  const [destWeather, setDestWeather] = useState<ApiWeather | null>(null);
   const shareRef = useRef<HTMLDivElement>(null);
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setFlight(flights.find((f) => f.id === id));
   }, [flights, id]);
+
+  // Clear any pending refresh-outcome reset on unmount.
+  useEffect(() => {
+    return () => {
+      if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+    };
+  }, []);
+
+  // ── METAR/TAF weather: fetch origin + destination on open, refresh ≤10 min ──
+  const originIcao = flight?.origin.icao;
+  const destIcao = flight?.destination.icao;
+  useEffect(() => {
+    if (!id) return;
+    const isIcao = (code: string | undefined): code is string => !!code && /^[A-Za-z]{4}$/.test(code);
+    let cancelled = false;
+
+    async function load() {
+      if (isIcao(originIcao)) {
+        const w = await fetchWeather(originIcao);
+        if (!cancelled) setOriginWeather(w);
+      }
+      if (isIcao(destIcao)) {
+        const w = await fetchWeather(destIcao);
+        if (!cancelled) setDestWeather(w);
+      }
+    }
+
+    setOriginWeather(null);
+    setDestWeather(null);
+    load();
+    const interval = setInterval(load, 10 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [id, originIcao, destIcao]);
+
+  // ── Live position polling (detail map only): every POSITION_INTERVAL_MS ──
+  const flightId = flight?.id;
+  const flightStatus = flight?.status;
+  const isDemo = flight?.isDemo;
+  useEffect(() => {
+    if (!flightId || isDemo) return;
+    const terminal = flightStatus === 'landed' || flightStatus === 'cancelled' || flightStatus === 'diverted';
+    if (terminal) return;
+
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    function start() {
+      if (interval !== null) return;
+      refreshPosition(flightId!);
+      interval = setInterval(() => refreshPosition(flightId!), POSITION_INTERVAL_MS);
+    }
+    function stop() {
+      if (interval !== null) {
+        clearInterval(interval);
+        interval = null;
+      }
+    }
+    function handleVisibility() {
+      if (document.visibilityState === 'visible') start();
+      else stop();
+    }
+
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      stop();
+    };
+  }, [flightId, flightStatus, isDemo]);
 
   // If flights are still loading, show the skeleton
   const loading = flights.length === 0 && !flight;
@@ -205,6 +287,25 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
     }
   }
 
+  async function handleRefresh() {
+    if (!flight || refreshState === 'refreshing') return;
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+      refreshTimeoutRef.current = null;
+    }
+    setRefreshState('refreshing');
+    const result = await refreshFlight(flight.id);
+    // 'skipped' → back to idle silently; otherwise reflect the outcome briefly.
+    const next = result === 'skipped' ? 'idle' : result;
+    setRefreshState(next);
+    if (next !== 'idle') {
+      refreshTimeoutRef.current = setTimeout(() => {
+        setRefreshState('idle');
+        refreshTimeoutRef.current = null;
+      }, 2500);
+    }
+  }
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -222,6 +323,26 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
           <ArrowLeft size={20} className="text-[var(--text-primary)]" />
         </button>
         <div className="flex-1" />
+        <button
+          onClick={handleRefresh}
+          disabled={refreshState === 'refreshing'}
+          className={`w-10 h-10 rounded-full bg-[var(--bg-tertiary)] flex items-center justify-center active:scale-90 transition-transform disabled:opacity-60 ${
+            refreshState === 'fresh' ? 'text-[#34C759]' :
+            refreshState === 'stale' ? 'text-amber-500' :
+            refreshState === 'failed' ? 'text-rose-500' : 'text-[var(--text-primary)]'
+          }`}
+          aria-label={
+            refreshState === 'refreshing' ? 'Refreshing flight' :
+            refreshState === 'fresh' ? 'Flight refreshed' :
+            refreshState === 'stale' ? 'Showing saved data' :
+            refreshState === 'failed' ? 'Refresh failed' : 'Refresh flight'
+          }
+        >
+          <ArrowsClockwise
+            size={20}
+            className={refreshState === 'refreshing' ? 'animate-spin' : ''}
+          />
+        </button>
         <button
           onClick={handleShare}
           disabled={sharing}
@@ -324,7 +445,7 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
       <div className="mb-4">
         <FlightInfoBar
           durationMinutes={Math.round((new Date(flight.scheduledArrival).getTime() - new Date(flight.scheduledDeparture).getTime()) / 60000)}
-          distanceKm={Math.round(1000 + Math.random() * 9000)}
+          distanceKm={greatCircleKm(flight.origin.lat, flight.origin.lon, flight.destination.lat, flight.destination.lon)}
           isOvernight={new Date(flight.scheduledArrival).getDate() > new Date(flight.scheduledDeparture).getDate()}
           departureTime={flight.scheduledDeparture}
           arrivalTime={flight.scheduledArrival}
@@ -469,6 +590,32 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
         </div>
       )}
 
+      {/* Pilot Weather (METAR/TAF) */}
+      {(originWeather?.metar || destWeather?.metar) ? (
+        <div className="card p-5 mb-4">
+          <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3 flex items-center gap-2">
+            <Cloud size={16} weight="fill" className="text-[#007AFF]" />
+            Pilot Weather
+          </h3>
+          <div className="space-y-4">
+            {originWeather?.metar && (
+              <WeatherAirportBlock code={flight.origin.icao || flight.origin.iata} weather={originWeather} />
+            )}
+            {destWeather?.metar && (
+              <WeatherAirportBlock code={flight.destination.icao || flight.destination.iata} weather={destWeather} />
+            )}
+          </div>
+        </div>
+      ) : (originWeather !== null || destWeather !== null) ? (
+        <div className="card p-5 mb-4">
+          <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3 flex items-center gap-2">
+            <Cloud size={16} weight="fill" className="text-[#007AFF]" />
+            Pilot Weather
+          </h3>
+          <p className="text-xs text-[var(--text-tertiary)]">Weather unavailable</p>
+        </div>
+      ) : null}
+
       {/* Inbound Aircraft */}
       {flight.inbound && (
         <div className="card p-5 mb-4">
@@ -535,15 +682,22 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
             destLon={flight.destination.lon}
             originIata={flight.origin.iata}
             destIata={flight.destination.iata}
+            position={flight.livePosition ?? null}
           />
         </div>
       </div>
 
       {/* Update info */}
-      <div className="text-center mb-8">
-        <span className="text-xs text-[var(--text-tertiary)]">
+      <div className="text-center mb-8 space-y-1">
+        <div className="text-xs text-[var(--text-tertiary)]">
           <LiveUpdateCounter lastUpdatedAt={flight.lastUpdatedAt} />
-        </span>
+        </div>
+        {flight.isStale && (
+          <div className="text-xs text-amber-500">Showing saved data</div>
+        )}
+        {flight.lastLiveError && !flight.isStale && (
+          <div className="text-xs text-[var(--text-tertiary)] opacity-70">Couldn't refresh</div>
+        )}
       </div>
     </motion.div>
   );
@@ -577,17 +731,86 @@ function TravellerRow({ icon, label, value }: { icon: React.ReactNode; label: st
   );
 }
 
-/** MapLibre GL map showing the flight route with a simulated aircraft position */
+/** Raw METAR/TAF plus wind/vis/temp chips for a single airport. */
+function WeatherAirportBlock({ code, weather }: { code: string; weather: ApiWeather }) {
+  const chips: { icon: React.ReactNode; label: string }[] = [];
+  if (weather.windSpeedKts != null) {
+    const gust = weather.windGustKts != null ? `G${Math.round(weather.windGustKts)}` : '';
+    chips.push({ icon: <Wind size={12} weight="fill" />, label: `${Math.round(weather.windSpeedKts)}${gust} kt` });
+  }
+  if (weather.visibilityKm != null) {
+    chips.push({ icon: <Eye size={12} weight="fill" />, label: `${weather.visibilityKm} km` });
+  }
+  if (weather.temperatureC != null) {
+    chips.push({ icon: <Thermometer size={12} weight="fill" />, label: `${Math.round(weather.temperatureC)}°C` });
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <span className="text-xs font-semibold text-[var(--text-primary)] tracking-wide">{code}</span>
+        {weather.stale && (
+          <span className="text-[10px] text-amber-500">saved</span>
+        )}
+      </div>
+      {weather.metar && (
+        <pre className="text-[11px] leading-relaxed font-mono text-[var(--text-secondary)] whitespace-pre-wrap break-words bg-[var(--bg-tertiary)] rounded-lg p-2">
+          {weather.metar}
+        </pre>
+      )}
+      {weather.taf && (
+        <details className="mt-1.5">
+          <summary className="text-[11px] text-[#007AFF] cursor-pointer select-none">TAF</summary>
+          <pre className="text-[11px] leading-relaxed font-mono text-[var(--text-secondary)] whitespace-pre-wrap break-words bg-[var(--bg-tertiary)] rounded-lg p-2 mt-1 max-h-40 overflow-y-auto">
+            {weather.taf}
+          </pre>
+        </details>
+      )}
+      {chips.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {chips.map((chip, i) => (
+            <span
+              key={i}
+              className="flex items-center gap-1 text-[11px] text-[var(--text-secondary)] bg-[var(--bg-tertiary)] rounded-full px-2 py-0.5"
+            >
+              {chip.icon}
+              {chip.label}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Human-friendly observed timestamp for the plane popup. */
+function formatObserved(iso: string): string {
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return '';
+  const seconds = Math.floor((Date.now() - t) / 1000);
+  if (seconds < 60) return 'just now';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return new Date(iso).toLocaleString();
+}
+
+/** MapLibre GL map showing the flight route with the real live aircraft position. */
 function FlightMap({
-  originLat, originLon, destLat, destLon, originIata, destIata,
+  originLat, originLon, destLat, destLon, originIata, destIata, position,
 }: {
   originLat: number; originLon: number;
   destLat: number; destLon: number;
   originIata: string; destIata: string;
+  position: LivePosition | null;
 }) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
+  const planeMarkerRef = useRef<maplibregl.Marker | null>(null);
+  const loadedRef = useRef(false);
+  const positionRef = useRef<LivePosition | null>(position);
+  positionRef.current = position;
 
+  // Create the map once and draw origin/destination markers + dashed route.
   useEffect(() => {
     if (!mapContainer.current || mapRef.current) return;
 
@@ -603,19 +826,18 @@ function FlightMap({
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
 
     map.on('load', () => {
-      // Add origin marker
+      loadedRef.current = true;
+
       new maplibregl.Marker({ color: '#007AFF' })
         .setLngLat([originLon, originLat])
         .setPopup(new maplibregl.Popup({ offset: 25 }).setText(originIata))
         .addTo(map);
 
-      // Add destination marker
       new maplibregl.Marker({ color: '#FF3B30' })
         .setLngLat([destLon, destLat])
         .setPopup(new maplibregl.Popup({ offset: 25 }).setText(destIata))
         .addTo(map);
 
-      // Add route line
       map.addSource('route', {
         type: 'geojson',
         data: {
@@ -644,19 +866,8 @@ function FlightMap({
         },
       });
 
-      // Simulated aircraft position (40% along the route)
-      const frac = 0.4;
-      const midLon = originLon + (destLon - originLon) * frac;
-      const midLat = originLat + (destLat - originLat) * frac;
-
-      new maplibregl.Marker({
-        color: '#34C759',
-        scale: 0.8,
-        rotation: 45,
-      })
-        .setLngLat([midLon, midLat])
-        .setPopup(new maplibregl.Popup({ offset: 25 }).setHTML(`<b>Simulated position</b><br/>En route ${originIata} → ${destIata}`))
-        .addTo(map);
+      // Draw the live aircraft marker if a position is already available.
+      syncPlaneMarker();
     });
 
     mapRef.current = map;
@@ -664,10 +875,66 @@ function FlightMap({
     return () => {
       map.remove();
       mapRef.current = null;
+      planeMarkerRef.current = null;
+      loadedRef.current = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [originLat, originLon, destLat, destLon, originIata, destIata]);
 
+  // Create/update/remove the live aircraft marker whenever `position` changes.
+  function syncPlaneMarker() {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+
+    const pos = positionRef.current;
+    if (!pos) {
+      if (planeMarkerRef.current) {
+        planeMarkerRef.current.remove();
+        planeMarkerRef.current = null;
+      }
+      return;
+    }
+
+    const color = pos.stale ? '#8E8E93' : '#34C759';
+    const lngLat: [number, number] = [pos.longitude, pos.latitude];
+    const heading = pos.heading ?? 0;
+
+    const observed = formatObserved(pos.observedAt);
+    const statusLabel = pos.stale ? `Last seen ${observed}` : 'Live';
+    const alt = pos.altitudeFt != null ? `${Math.round(pos.altitudeFt).toLocaleString()} ft` : '—';
+    const spd = pos.groundSpeedKt != null ? `${Math.round(pos.groundSpeedKt)} kt` : '—';
+    const popupHtml = `<b>${statusLabel}</b><br/>Alt ${alt} · ${spd}<br/>Observed ${observed}`;
+
+    if (planeMarkerRef.current) {
+      planeMarkerRef.current.setLngLat(lngLat);
+      planeMarkerRef.current.setRotation(heading);
+      planeMarkerRef.current.getPopup()?.setHTML(popupHtml);
+      const el = planeMarkerRef.current.getElement();
+      const path = el.querySelector('svg path');
+      if (path) path.setAttribute('fill', color);
+    } else {
+      planeMarkerRef.current = new maplibregl.Marker({ color, scale: 0.85, rotation: heading })
+        .setLngLat(lngLat)
+        .setPopup(new maplibregl.Popup({ offset: 25 }).setHTML(popupHtml))
+        .addTo(map);
+    }
+  }
+
+  useEffect(() => {
+    syncPlaneMarker();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [position]);
+
   return (
-    <div ref={mapContainer} className="w-full h-full" />
+    <>
+      <div ref={mapContainer} className="w-full h-full" />
+      {!position && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <span className="text-xs font-medium text-[var(--text-secondary)] bg-[var(--bg-primary)]/80 backdrop-blur-sm rounded-full px-3 py-1.5 shadow-sm">
+            Live position unavailable
+          </span>
+        </div>
+      )}
+    </>
   );
 }

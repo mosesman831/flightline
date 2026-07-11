@@ -1,5 +1,8 @@
 import { get, set, del, keys, createStore } from 'idb-keyval';
 import type { Flight } from '../types/flight';
+import type { NormalizedFlight } from '../utils/api';
+import { snapshotToLiveFields, diffFlightTimeline } from '../utils/liveFlight';
+import { predictDelay } from '../utils/predictions';
 
 const flightStore = createStore('flightline-db', 'flights');
 
@@ -27,46 +30,112 @@ export async function getFlight(id: string): Promise<Flight | undefined> {
   return get<Flight>(id, flightStore);
 }
 
+/** Persist a flight. Does not mutate its argument. */
 export async function saveFlight(flight: Flight): Promise<void> {
-  flight.lastUpdatedAt = new Date().toISOString();
-  await set(flight.id, flight, flightStore);
+  const copy: Flight = { ...flight, lastUpdatedAt: new Date().toISOString() };
+  await set(copy.id, copy, flightStore);
 }
 
 export async function deleteFlight(id: string): Promise<void> {
   await del(id, flightStore);
+  notifyFlightsChanged();
 }
 
 export async function archiveFlight(id: string): Promise<void> {
   const flight = await getFlight(id);
   if (flight) {
-    flight.archived = true;
-    await saveFlight(flight);
+    await saveFlight({ ...flight, archived: true });
+    notifyFlightsChanged();
   }
 }
 
 export async function unarchiveFlight(id: string): Promise<void> {
   const flight = await getFlight(id);
   if (flight) {
-    flight.archived = false;
-    await saveFlight(flight);
+    await saveFlight({ ...flight, archived: false });
+    notifyFlightsChanged();
   }
 }
 
 export async function toggleStar(id: string): Promise<void> {
   const flight = await getFlight(id);
   if (flight) {
-    flight.starred = !flight.starred;
-    await saveFlight(flight);
+    await saveFlight({ ...flight, starred: !flight.starred });
+    notifyFlightsChanged();
   }
 }
 
 export async function updateFlightStatus(id: string, updates: Partial<Flight>): Promise<void> {
   const flight = await getFlight(id);
   if (flight) {
-    Object.assign(flight, updates);
-    flight.lastUpdatedAt = new Date().toISOString();
-    await set(id, flight, flightStore);
+    await saveFlight({ ...flight, ...updates });
+    notifyFlightsChanged();
   }
+}
+
+/**
+ * Merge a live Worker snapshot into a saved flight. Reads once, merges only
+ * provider-owned fields, preserves traveller/local fields, generates timeline
+ * diffs, recomputes the persisted prediction, writes once, and notifies once.
+ * Returns the merged flight (or undefined if the flight no longer exists).
+ */
+export async function mergeLiveSnapshot(id: string, snapshot: NormalizedFlight): Promise<Flight | undefined> {
+  const current = await getFlight(id);
+  if (!current) return undefined;
+
+  const liveFields = snapshotToLiveFields(snapshot);
+  const events = diffFlightTimeline(current, liveFields, snapshot.statusSource ?? 'live');
+  const now = new Date().toISOString();
+
+  const merged: Flight = {
+    ...current,
+    ...liveFields,
+    timeline: events.length > 0 ? [...current.timeline, ...events] : current.timeline,
+    lastUpdatedAt: now,
+    lastLiveAttemptAt: now,
+    lastLiveSuccessAt: now,
+    isStale: snapshot.stale,
+    lastLiveError: null,
+  };
+
+  // Recompute + persist the prediction so list and detail agree.
+  const prediction = predictDelay(merged);
+  merged.delayChance = prediction.delayChance;
+  merged.predictedDeparture = merged.predictedDeparture ?? prediction.predictedDeparture;
+  merged.predictedArrival = merged.predictedArrival ?? prediction.predictedArrival;
+  merged.delayReasons = prediction.delayReasons;
+
+  await set(id, merged, flightStore);
+  notifyFlightsChanged();
+  return merged;
+}
+
+/** Record a failed live refresh: retain last-known data, mark stale/error. */
+export async function recordLiveFailure(id: string, error: string): Promise<void> {
+  const current = await getFlight(id);
+  if (!current) return;
+  const merged: Flight = {
+    ...current,
+    lastLiveAttemptAt: new Date().toISOString(),
+    isStale: true,
+    lastLiveError: error,
+  };
+  await set(id, merged, flightStore);
+  notifyFlightsChanged();
+}
+
+/** Persist a refreshed live position without touching other fields. */
+export async function updateFlightPosition(id: string, position: Flight['livePosition']): Promise<void> {
+  const current = await getFlight(id);
+  if (!current || !position) return;
+  await set(id, { ...current, livePosition: position, positionUpdatedAt: position.observedAt }, flightStore);
+  notifyFlightsChanged();
+}
+
+/** Find a saved flight by its canonical key (serviceDate:IATA_NUMBER). */
+export async function findByCanonicalKey(canonicalKey: string): Promise<Flight | undefined> {
+  const all = await getAllFlights();
+  return all.find((f) => f.canonicalKey === canonicalKey);
 }
 
 export async function addDemoFlightsIfEmpty(): Promise<boolean> {

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { addDemoFlightsIfEmpty, getAllFlights, subscribeFlights } from './store/flightStore';
 import { useFlightPolling } from './utils/useFlightPolling';
+import { refreshAllDue } from './utils/refresh';
 import type { Flight } from './types/flight';
 import Layout from './components/Layout';
 import FlightsList from './routes/FlightsList';
@@ -63,8 +64,8 @@ export default function App() {
   const activeFlights = flights.filter((f) => !f.archived);
   const archivedFlights = flights.filter((f) => f.archived);
 
-  // Poll for live flight data updates every 60 seconds
-  useFlightPolling(activeFlights, 60_000);
+  // Visibility-aware live polling (per-flight cadence handled internally)
+  useFlightPolling(activeFlights);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -76,7 +77,8 @@ export default function App() {
       switch (e.key.toLowerCase()) {
         case 'r':
           e.preventDefault();
-          refresh();
+          // Force a real network refresh, then reload from the store.
+          void refreshAllDue({ force: true }).then(refresh);
           break;
         case 'n':
           e.preventDefault();

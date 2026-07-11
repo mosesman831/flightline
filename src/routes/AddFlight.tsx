@@ -3,7 +3,6 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'motion/react';
 import {
   ArrowLeft,
-  ArrowRight,
   Airplane,
   CalendarBlank,
   Seat,
@@ -12,14 +11,12 @@ import {
   CaretDown,
   Lightning,
 } from '@phosphor-icons/react';
-import { AIRLINE_NAMES } from '../data/airlines';
-import { searchAirports } from '../data/airports';
-import { saveFlight } from '../store/flightStore';
-import { generateId } from '../utils/format';
+import { AIRLINE_NAMES, getAirline } from '../data/airlines';
+import { saveFlight, findByCanonicalKey, mergeLiveSnapshot } from '../store/flightStore';
+import { trackFlight, TrackError } from '../utils/api';
+import { buildFlightFromSnapshot } from '../utils/liveFlight';
 import { hapticSuccess, hapticError } from '../utils/haptic';
-import type { Flight, CabinClass } from '../types/flight';
-import { getAirport } from '../data/airports';
-import { getAirline } from '../data/airlines';
+import type { CabinClass } from '../types/flight';
 
 interface AddFlightProps {
   onAdded: () => void;
@@ -32,24 +29,30 @@ const CABIN_CLASSES: { value: CabinClass; label: string }[] = [
   { value: 'first', label: 'First' },
 ];
 
-const RECENT_ROUTES_KEY = 'flightline-recent-routes';
-
-function getRecentRoutes(): { origin: string; dest: string }[] {
-  try {
-    const stored = localStorage.getItem(RECENT_ROUTES_KEY);
-    return stored ? JSON.parse(stored) : [];
-  } catch {
-    return [];
-  }
+/** Local YYYY-MM-DD for `offsetDays` from today (0 = today). */
+function isoDateOffset(offsetDays: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
 }
 
-function addRecentRoute(origin: string, dest: string) {
-  try {
-    const routes = getRecentRoutes().filter((r) => !(r.origin === origin && r.dest === dest));
-    routes.unshift({ origin, dest });
-    localStorage.setItem(RECENT_ROUTES_KEY, JSON.stringify(routes.slice(0, 5)));
-  } catch {
-    // Silently fail
+/** Human-readable inline message for a {@link TrackError} code. */
+function trackErrorMessage(code: TrackError['code']): string {
+  switch (code) {
+    case 'not_found':
+      return 'Flight not found. Check number and date.';
+    case 'invalid_input':
+      return 'Please check the airline, flight number, and date.';
+    case 'rate_limited':
+      return 'Rate limited by the data provider. Try again shortly.';
+    case 'offline':
+      return "You're offline. Connect to add a new flight.";
+    case 'providers_unavailable':
+      return 'Live flight data is unavailable right now. Try again later.';
+    case 'network':
+      return "Couldn't reach the server. Check your connection.";
+    default:
+      return 'Something went wrong. Please try again.';
   }
 }
 
@@ -140,6 +143,9 @@ export default function AddFlight({ onAdded }: AddFlightProps) {
   const navigate = useNavigate();
   const params = useParams();
 
+  const todayStr = useMemo(() => isoDateOffset(0), []);
+  const maxDateStr = useMemo(() => isoDateOffset(2), []);
+
   const [quickText, setQuickText] = useState('');
   const [showQuickParse, setShowQuickParse] = useState(false);
 
@@ -149,27 +155,17 @@ export default function AddFlight({ onAdded }: AddFlightProps) {
     return localStorage.getItem('flightline-last-airline');
   });
   const [flightNumber, setFlightNumber] = useState('');
-  const [date, setDate] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() + 1);
-    return d.toISOString().slice(0, 10);
-  });
+  const [date, setDate] = useState(() => isoDateOffset(0));
   const [seatNumber, setSeatNumber] = useState('');
   const [checkInDesk, setCheckInDesk] = useState('');
   const [cabinClass, setCabinClass] = useState<CabinClass>('economy');
   const [personalNotes, setPersonalNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [airlineOpen, setAirlineOpen] = useState(false);
-  const [originQuery, setOriginQuery] = useState('');
-  const [destQuery, setDestQuery] = useState('');
-  const [selectedOrigin, setSelectedOrigin] = useState<string>('JFK');
-  const [selectedDest, setSelectedDest] = useState<string>('LHR');
-  const [originOpen, setOriginOpen] = useState(false);
-  const [destOpen, setDestOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [online, setOnline] = useState(navigator.onLine);
 
   const airlineRef = useRef<HTMLDivElement>(null);
-  const originRef = useRef<HTMLDivElement>(null);
-  const destRef = useRef<HTMLDivElement>(null);
 
   const filteredAirlines = useMemo(() => {
     if (!airlineQuery) return AIRLINE_NAMES;
@@ -180,31 +176,27 @@ export default function AddFlight({ onAdded }: AddFlightProps) {
     );
   }, [airlineQuery]);
 
-  const originResults = useMemo(() => {
-    if (!originQuery) return [];
-    return searchAirports(originQuery);
-  }, [originQuery]);
-
-  const destResults = useMemo(() => {
-    if (!destQuery) return [];
-    return searchAirports(destQuery);
-  }, [destQuery]);
-
   const selectedAirlineName = selectedAirlineCode
     ? getAirline(selectedAirlineCode).name
     : null;
 
-  // Close dropdowns on outside click
+  // Track online/offline status.
+  useEffect(() => {
+    const handleOnline = () => setOnline(true);
+    const handleOffline = () => setOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Close the airline dropdown on outside click.
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (airlineRef.current && !airlineRef.current.contains(e.target as Node)) {
         setAirlineOpen(false);
-      }
-      if (originRef.current && !originRef.current.contains(e.target as Node)) {
-        setOriginOpen(false);
-      }
-      if (destRef.current && !destRef.current.contains(e.target as Node)) {
-        setDestOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClick);
@@ -220,77 +212,65 @@ export default function AddFlight({ onAdded }: AddFlightProps) {
         setSelectedAirlineCode(airline.toUpperCase());
       }
     }
-    if (fn) setFlightNumber(fn);
+    if (fn) setFlightNumber(fn.toUpperCase());
     if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) setDate(d);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const canSubmit = selectedAirlineCode && flightNumber.trim().length > 0 && date;
+  const canSubmit =
+    !!selectedAirlineCode && flightNumber.trim().length > 0 && !!date && online;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!canSubmit) return;
+    if (!navigator.onLine) return;
 
     setSubmitting(true);
+    setError(null);
     try {
-      const airlineInfo = getAirline(selectedAirlineCode!);
-      const departureDate = new Date(date);
-      departureDate.setHours(12, 0, 0, 0);
-      const arrivalDate = new Date(departureDate);
-      arrivalDate.setHours(departureDate.getHours() + 4);
+      const airlineIata = getAirline(selectedAirlineCode!).iata.toUpperCase();
 
-      const newFlight: Flight = {
-        id: generateId(),
-        airlineIata: airlineInfo.iata,
-        airlineName: airlineInfo.name,
-        flightNumber: flightNumber.trim().toUpperCase(),
-        date,
-        scheduledDeparture: departureDate.toISOString(),
-        scheduledArrival: arrivalDate.toISOString(),
-        predictedDeparture: null,
-        predictedArrival: null,
-        actualDeparture: null,
-        actualArrival: null,
-        origin: getAirport(selectedOrigin),
-        destination: getAirport(selectedDest),
-        status: 'scheduled',
-        delayMinutes: null,
-        delayChance: 0,
-        delayReasons: [],
-        gate: null,
-        terminal: null,
-        aircraft: null,
-        tailNumber: null,
+      // Normalize the flight number: uppercase, keep alphanumerics only, strip a
+      // leading airline-IATA prefix, then keep digits + an optional letter suffix.
+      let number = flightNumber.trim().toUpperCase().replace(/[^0-9A-Z]/g, '');
+      if (airlineIata && number.startsWith(airlineIata)) {
+        number = number.slice(airlineIata.length);
+      }
+      const numMatch = number.match(/^\d{1,4}[A-Z]?/);
+      number = numMatch ? numMatch[0] : number;
+
+      const snap = await trackFlight(airlineIata, number, date);
+      const existing = await findByCanonicalKey(snap.canonicalKey);
+
+      if (existing) {
+        await mergeLiveSnapshot(existing.id, snap);
+        hapticSuccess();
+        onAdded();
+        navigate(`/flight/${existing.id}`);
+        return;
+      }
+
+      const flight = buildFlightFromSnapshot(snap, {
         seatNumber: seatNumber.trim() || null,
         checkInDesk: checkInDesk.trim() || null,
-        baggageReclaim: null,
-        personalNotes: personalNotes.trim() || null,
-        boardingGroup: null,
-        boardingTime: null,
         cabinClass,
-        timeline: [],
-        inbound: null,
-        pilotData: null,
-        departureWeather: [],
-        arrivalWeather: [],
-        addedAt: new Date().toISOString(),
-        lastUpdatedAt: new Date().toISOString(),
-        isDemo: false,
-        archived: false,
-        starred: false,
-      };
-
-      await saveFlight(newFlight);
+        personalNotes: personalNotes.trim() || null,
+      });
+      await saveFlight(flight);
       hapticSuccess();
       // Save last airline for smart defaults
       if (selectedAirlineCode) {
         localStorage.setItem('flightline-last-airline', selectedAirlineCode);
       }
-      // Save recent route for smart suggestions
-      addRecentRoute(selectedOrigin, selectedDest);
       onAdded();
-      navigate('/');
-    } catch {
+      navigate(`/flight/${flight.id}`);
+    } catch (err) {
       hapticError();
+      if (err instanceof TrackError) {
+        setError(trackErrorMessage(err.code));
+      } else {
+        setError('Something went wrong. Please try again.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -449,163 +429,14 @@ export default function AddFlight({ onAdded }: AddFlightProps) {
           </div>
         </div>
 
-        {/* Origin & Destination */}
-        <div className="card p-5 space-y-4">
-          <SectionLabel icon={<Airplane size={16} />} label="Route" />
-
-          <div ref={originRef} className="relative">
-            <label className="block text-xs font-semibold text-[var(--text-tertiary)] uppercase tracking-wider mb-1.5">
-              Origin
-            </label>
-            <button
-              type="button"
-              onClick={() => setOriginOpen(!originOpen)}
-              className="w-full flex items-center justify-between px-4 py-3.5 rounded-2xl bg-[var(--bg-tertiary)] text-left"
-              aria-label={`Origin: ${getAirport(selectedOrigin).city} (${selectedOrigin})`}
-            >
-              <span className="text-[var(--text-primary)] font-medium">
-                {getAirport(selectedOrigin).city} ({selectedOrigin})
-              </span>
-              <CaretDown size={16} className="text-[var(--text-tertiary)]" weight="bold" />
-            </button>
-
-            {originOpen && (
-              <div className="absolute top-full left-0 right-0 mt-1 z-30 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-2xl shadow-xl overflow-hidden">
-                <div className="p-2">
-                  <input
-                    value={originQuery}
-                    onChange={(e) => setOriginQuery(e.target.value)}
-                    placeholder="Search airports..."
-                    className="w-full px-3 py-2.5 rounded-xl bg-[var(--bg-tertiary)] text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
-                    autoFocus
-                  />
-                </div>
-                <div className="max-h-52 overflow-y-auto">
-                  {originResults.map((ap) => (
-                    <button
-                      key={ap.iata}
-                      type="button"
-                      onClick={() => {
-                        setSelectedOrigin(ap.iata);
-                        setOriginQuery('');
-                        setOriginOpen(false);
-                      }}
-                      className={`w-full flex items-center gap-3 px-4 py-3 text-sm text-left hover:bg-[var(--bg-tertiary)] transition-colors ${
-                        selectedOrigin === ap.iata ? 'bg-[var(--bg-tertiary)]' : ''
-                      }`}
-                    >
-                      <span className="text-[var(--text-primary)] font-medium">{ap.city}</span>
-                      <span className="text-[var(--text-secondary)]">{ap.iata}</span>
-                      <span className="text-[var(--text-tertiary)] text-xs ml-auto truncate">{ap.name}</span>
-                    </button>
-                  ))}
-                  {originResults.length === 0 && originQuery && (
-                    <p className="px-4 py-3 text-sm text-[var(--text-tertiary)]">No airports found</p>
-                  )}
-                  {!originQuery && (
-                    <p className="px-4 py-3 text-sm text-[var(--text-tertiary)]">Type to search airports</p>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div ref={destRef} className="relative">
-            <label className="block text-xs font-semibold text-[var(--text-tertiary)] uppercase tracking-wider mb-1.5">
-              Destination
-            </label>
-            <button
-              type="button"
-              onClick={() => setDestOpen(!destOpen)}
-              className="w-full flex items-center justify-between px-4 py-3.5 rounded-2xl bg-[var(--bg-tertiary)] text-left"
-              aria-label={`Destination: ${getAirport(selectedDest).city} (${selectedDest})`}
-            >
-              <span className="text-[var(--text-primary)] font-medium">
-                {getAirport(selectedDest).city} ({selectedDest})
-              </span>
-              <CaretDown size={16} className="text-[var(--text-tertiary)]" weight="bold" />
-            </button>
-
-            {destOpen && (
-              <div className="absolute top-full left-0 right-0 mt-1 z-30 bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-2xl shadow-xl overflow-hidden">
-                <div className="p-2">
-                  <input
-                    value={destQuery}
-                    onChange={(e) => setDestQuery(e.target.value)}
-                    placeholder="Search airports..."
-                    className="w-full px-3 py-2.5 rounded-xl bg-[var(--bg-tertiary)] text-sm text-[var(--text-primary)] outline-none placeholder:text-[var(--text-tertiary)]"
-                    autoFocus
-                  />
-                </div>
-                <div className="max-h-52 overflow-y-auto">
-                  {destResults.map((ap) => (
-                    <button
-                      key={ap.iata}
-                      type="button"
-                      onClick={() => {
-                        setSelectedDest(ap.iata);
-                        setDestQuery('');
-                        setDestOpen(false);
-                      }}
-                      className={`w-full flex items-center gap-3 px-4 py-3 text-sm text-left hover:bg-[var(--bg-tertiary)] transition-colors ${
-                        selectedDest === ap.iata ? 'bg-[var(--bg-tertiary)]' : ''
-                      }`}
-                    >
-                      <span className="text-[var(--text-primary)] font-medium">{ap.city}</span>
-                      <span className="text-[var(--text-secondary)]">{ap.iata}</span>
-                      <span className="text-[var(--text-tertiary)] text-xs ml-auto truncate">{ap.name}</span>
-                    </button>
-                  ))}
-                  {destResults.length === 0 && destQuery && (
-                    <p className="px-4 py-3 text-sm text-[var(--text-tertiary)]">No airports found</p>
-                  )}
-                  {!destQuery && (
-                    <p className="px-4 py-3 text-sm text-[var(--text-tertiary)]">Type to search airports</p>
-                  )}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Recent Routes */}
-        {getRecentRoutes().length > 0 && (
-          <div className="card p-4">
-            <div className="flex items-center gap-2 mb-2.5">
-              <span className="text-xs font-semibold text-[var(--text-tertiary)] uppercase tracking-wider">
-                Recent Routes
-              </span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {getRecentRoutes().map((route) => (
-                <button
-                  key={`${route.origin}-${route.dest}`}
-                  type="button"
-                  onClick={() => {
-                    setSelectedOrigin(route.origin);
-                    setSelectedDest(route.dest);
-                  }}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium transition-all duration-200 active:scale-95 ${
-                    selectedOrigin === route.origin && selectedDest === route.dest
-                      ? 'bg-[#007AFF] text-white'
-                      : 'bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:bg-[var(--border-color)]'
-                  }`}
-                >
-                  <span>{route.origin}</span>
-                  <ArrowRight size={12} weight="bold" />
-                  <span>{route.dest}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Date */}
         <div className="card p-5 space-y-4">
           <SectionLabel icon={<CalendarBlank size={16} />} label="Date" />
           <input
             type="date"
             value={date}
+            min={todayStr}
+            max={maxDateStr}
             onChange={(e) => setDate(e.target.value)}
             className="w-full px-4 py-3.5 rounded-2xl bg-[var(--bg-tertiary)] text-[var(--text-primary)] font-medium text-base outline-none focus:ring-2 focus:ring-[#007AFF]/30 transition-shadow"
           />
@@ -675,6 +506,20 @@ export default function AddFlight({ onAdded }: AddFlightProps) {
             />
           </div>
         </div>
+
+        {/* Offline helper */}
+        {!online && (
+          <p className="text-xs text-[var(--text-tertiary)] text-center px-2">
+            You're offline — saved flights stay available, but adding needs a connection.
+          </p>
+        )}
+
+        {/* Inline error */}
+        {error && (
+          <p role="alert" className="text-sm font-medium text-rose-500 text-center px-2">
+            {error}
+          </p>
+        )}
 
         {/* Submit */}
         <button
