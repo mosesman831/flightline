@@ -101,6 +101,40 @@ export interface ApiWeather {
   observedAt: string | null;
 }
 
+/** A prior leg (inbound rotation) of the aircraft operating this flight. */
+export interface ApiInboundLeg {
+  found: boolean;
+  flightIata: string | null;
+  originIcao: string | null;
+  originIata: string | null;
+  destinationIcao: string | null;
+  scheduledArrival: string | null;
+  arrivalEstimated: string | null;
+  arrivalActual: string | null;
+  icao24: string;
+  tail: string | null;
+  source: 'opensky';
+}
+
+/** A single FAA National Airspace System advisory affecting an airport. */
+export interface ApiNasEvent {
+  type: 'ground_stop' | 'ground_delay' | 'closure' | 'delay';
+  reason: string | null;
+  avgDelayMinutes: number | null;
+  scope: string | null;
+  endTime: string | null;
+}
+
+/** FAA NAS status for a US airport. */
+export interface ApiNasStatus {
+  requestId: string;
+  fetchedAt: string;
+  airport: string;
+  hasIssues: boolean;
+  events: ApiNasEvent[];
+  source: 'faa';
+}
+
 /** Diagnostic report describing a single upstream data provider. */
 export interface ProviderReport {
   name: string;
@@ -299,6 +333,44 @@ export async function fetchProviders(): Promise<ProviderReport[]> {
     return (await resp.json()) as ProviderReport[];
   } catch {
     return [];
+  }
+}
+
+/**
+ * Fetch the inbound rotation (prior leg) of the aircraft, by ICAO24.
+ *
+ * GETs `/api/inbound/:icao24?airport=ICAO&before=ISO`. Returns null on 404 or
+ * any error (inbound tracking is best-effort / optional).
+ */
+export async function fetchInbound(
+  icao24: string,
+  airportIcao: string,
+  beforeIso: string,
+): Promise<ApiInboundLeg | null> {
+  const base = getApiBaseUrl();
+  try {
+    const qs = `airport=${encodeURIComponent(airportIcao)}&before=${encodeURIComponent(beforeIso)}`;
+    const resp = await fetch(`${base}/api/inbound/${encodeURIComponent(icao24)}?${qs}`, NO_STORE_INIT);
+    if (!resp.ok) return null;
+    return (await resp.json()) as ApiInboundLeg;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch FAA NAS status (ground stops / delays) for a US airport by IATA code.
+ *
+ * GETs `/api/nas/:iata`. Returns null on error or for non-US airports.
+ */
+export async function fetchNasStatus(iata: string): Promise<ApiNasStatus | null> {
+  const base = getApiBaseUrl();
+  try {
+    const resp = await fetch(`${base}/api/nas/${encodeURIComponent(iata)}`, NO_STORE_INIT);
+    if (!resp.ok) return null;
+    return (await resp.json()) as ApiNasStatus;
+  } catch {
+    return null;
   }
 }
 

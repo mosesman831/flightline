@@ -1,5 +1,5 @@
 import { useNavigate, useLocation } from 'react-router-dom';
-import { AirplaneTilt, Plus, Gear, Archive } from '@phosphor-icons/react';
+import { AirplaneTilt, Plus, Gear, Archive, GlobeHemisphereWest } from '@phosphor-icons/react';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface LayoutProps {
@@ -11,6 +11,7 @@ interface LayoutProps {
 const TABS = [
   { path: '/', icon: AirplaneTilt, label: 'Flights' },
   { path: '/add', icon: Plus, label: 'Add' },
+  { path: '/passport', icon: GlobeHemisphereWest, label: 'Passport' },
   { path: '/archive', icon: Archive, label: 'Archive' },
   { path: '/settings', icon: Gear, label: 'Settings' },
 ];

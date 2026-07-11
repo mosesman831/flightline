@@ -14,6 +14,7 @@ import FlightDetail from './routes/FlightDetail';
 import AddFlight from './routes/AddFlight';
 import Settings from './routes/Settings';
 import Archive from './routes/Archive';
+import Passport from './routes/Passport';
 
 export default function App() {
   const [flights, setFlights] = useState<Flight[]>([]);
@@ -143,6 +144,7 @@ export default function App() {
           <Route path="/add/:airline/:flightNumber/:date" element={<AddFlight onAdded={refresh} />} />
           <Route path="/settings" element={<Settings darkMode={darkMode} setDarkMode={setDarkMode} flights={flights} refresh={refresh} />} />
           <Route path="/archive" element={<Archive flights={archivedFlights} refresh={refresh} />} />
+          <Route path="/passport" element={<Passport flights={flights} />} />
         </Routes>
       </Layout>
     </div>

@@ -5,6 +5,8 @@ import {
   ArrowLeft,
   ArrowCounterClockwise,
   CalendarBlank,
+  Target,
+  CheckCircle,
 } from '@phosphor-icons/react';
 import FlightCard from '../components/FlightCard';
 import EmptyState from '../components/EmptyState';
@@ -16,6 +18,47 @@ import { downloadIcs } from '../utils/ics';
 interface ArchiveProps {
   flights: Flight[];
   refresh: () => void;
+}
+
+interface AccuracyBadge {
+  label: string;
+  classes: string;
+  nailed: boolean;
+}
+
+// SPEC §12.4b — prediction-accuracy badge for archived flights that have both
+// a predicted and an actual departure time.
+function getAccuracyBadge(flight: Flight): AccuracyBadge | null {
+  if (!flight.predictedDeparture || !flight.actualDeparture) return null;
+  const errMin = Math.round(
+    Math.abs(
+      new Date(flight.actualDeparture).getTime() -
+        new Date(flight.predictedDeparture).getTime()
+    ) / 60000
+  );
+  if (errMin <= 3)
+    return {
+      label: 'Nailed it',
+      classes: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+      nailed: true,
+    };
+  if (errMin <= 10)
+    return {
+      label: `${errMin} min off`,
+      classes: 'bg-blue-500/10 text-blue-500',
+      nailed: false,
+    };
+  if (errMin <= 30)
+    return {
+      label: `${errMin} min off`,
+      classes: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
+      nailed: false,
+    };
+  return {
+    label: `${errMin} min off`,
+    classes: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
+    nailed: false,
+  };
 }
 
 export default function Archive({ flights, refresh }: ArchiveProps) {
@@ -83,12 +126,27 @@ export default function Archive({ flights, refresh }: ArchiveProps) {
             }}
           />
         ) : (
-          flights.map((flight) => (
+          flights.map((flight) => {
+            const accuracy = getAccuracyBadge(flight);
+            return (
             <div key={flight.id} className="relative group">
               <FlightCard
                 flight={flight}
                 onClick={() => navigate(`/flight/${flight.id}`)}
               />
+              {/* SPEC §12.4b — prediction-accuracy pill */}
+              {accuracy && (
+                <div className="flex justify-end -mt-2 mb-2 pr-1">
+                  <span className={`pill ${accuracy.classes}`}>
+                    {accuracy.nailed ? (
+                      <CheckCircle size={12} weight="fill" />
+                    ) : (
+                      <Target size={12} weight="bold" />
+                    )}
+                    {accuracy.label}
+                  </span>
+                </div>
+              )}
               {/* Unarchive action overlay row */}
               <button
                 onClick={() => handleUnarchive(flight.id)}
@@ -104,7 +162,8 @@ export default function Archive({ flights, refresh }: ArchiveProps) {
                 )}
               </button>
             </div>
-          ))
+            );
+          })
         )}
       </div>
     </motion.div>

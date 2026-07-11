@@ -23,11 +23,24 @@ import {
   Wind,
   Eye,
   Thermometer,
+  Warning,
+  Broadcast,
 } from '@phosphor-icons/react';
 import type { Flight, LivePosition } from '../types/flight';
 import { greatCircleKm } from '../utils/geo';
 import { refreshFlight, refreshPosition, POSITION_INTERVAL_MS } from '../utils/refresh';
-import { fetchWeather, type ApiWeather } from '../utils/api';
+import {
+  fetchWeather,
+  fetchInbound,
+  fetchNasStatus,
+  type ApiWeather,
+  type ApiInboundLeg,
+  type ApiNasStatus,
+} from '../utils/api';
+import { buildDelayCauses } from '../utils/delayCauses';
+import { predictGate } from '../utils/gatePrediction';
+import { getRadarTileTemplate, RADAR_ATTRIBUTION } from '../utils/weatherRadar';
+import AirportIntelligence from '../components/AirportIntelligence';
 import { shareFlightCard } from '../utils/shareFlight';
 import { useOnlineStatus } from '../utils/useOnlineStatus';
 import AirlineLogo from '../components/AirlineLogo';
@@ -99,6 +112,10 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
   const [refreshState, setRefreshState] = useState<'idle' | 'refreshing' | 'fresh' | 'stale' | 'failed'>('idle');
   const [originWeather, setOriginWeather] = useState<ApiWeather | null>(null);
   const [destWeather, setDestWeather] = useState<ApiWeather | null>(null);
+  const [inbound, setInbound] = useState<ApiInboundLeg | null>(null);
+  const [nas, setNas] = useState<ApiNasStatus | null>(null);
+  const [radarOn, setRadarOn] = useState(false);
+  const [radarTemplate, setRadarTemplate] = useState<string | null>(null);
   const online = useOnlineStatus();
   const shareCardRef = useRef<HTMLDivElement>(null);
   const shareNoteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -179,6 +196,53 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
       stop();
     };
   }, [flightId, flightStatus, isDemo]);
+
+  // ── Inbound rotation (prior leg) via OpenSky, keyed on the live icao24 ──
+  const liveIcao24 = flight?.livePosition?.icao24;
+  const scheduledDeparture = flight?.scheduledDeparture;
+  useEffect(() => {
+    setInbound(null);
+    if (!flightId || !liveIcao24 || !originIcao || !scheduledDeparture) return;
+    let cancelled = false;
+    (async () => {
+      const leg = await fetchInbound(liveIcao24, originIcao, scheduledDeparture);
+      if (!cancelled) setInbound(leg);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [flightId, liveIcao24, originIcao, scheduledDeparture]);
+
+  // ── FAA NAS status (ground stops / delays) for the origin — US airports only ──
+  const originIata = flight?.origin.iata;
+  useEffect(() => {
+    setNas(null);
+    if (!originIata) return;
+    let cancelled = false;
+    (async () => {
+      const status = await fetchNasStatus(originIata);
+      if (!cancelled) setNas(status);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [originIata]);
+
+  // ── Precipitation radar tile template, fetched lazily when toggled on ──
+  useEffect(() => {
+    if (!radarOn || !online) {
+      setRadarTemplate(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const template = await getRadarTileTemplate();
+      if (!cancelled) setRadarTemplate(template);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [radarOn, online]);
 
   // If flights are still loading, show the skeleton
   const loading = flights.length === 0 && !flight;
@@ -261,6 +325,24 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
 
   const prediction = predictDelay(flight);
   const isActive = flight.status === 'scheduled' || flight.status === 'boarding' || flight.status === 'active';
+
+  // Merged delay causes (heuristics + live FAA NAS advisories) and gate hinting.
+  const causes = buildDelayCauses(flight, { nas });
+  const gatePred = predictGate(flight);
+  const inboundArrival = inbound?.arrivalActual ?? inbound?.arrivalEstimated ?? null;
+  const nasBannerText = nas?.hasIssues
+    ? nas.events
+        .map((event) => {
+          const label =
+            event.type === 'ground_stop' ? 'Ground stop' :
+            event.type === 'ground_delay' ? 'Ground delay' :
+            event.type === 'closure' ? 'Airport closure' : 'Delay program';
+          const avg = event.avgDelayMinutes != null ? ` · avg ${event.avgDelayMinutes} min` : '';
+          const reason = event.reason ? ` — ${event.reason}` : '';
+          return `${label}${avg}${reason}`;
+        })
+        .join(' • ')
+    : null;
 
   async function handleShare() {
     if (sharing || !shareCardRef.current || !flight) return;
@@ -472,7 +554,12 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
 
       {/* Quick Info Cards */}
       <div className="grid grid-cols-2 gap-3 mb-4">
-        <QuickInfoCard icon={<IdentificationBadge size={18} />} label="Gate" value={flight.gate ?? 'TBD'} />
+        <QuickInfoCard
+          icon={<IdentificationBadge size={18} />}
+          label="Gate"
+          value={flight.gate ?? 'TBD'}
+          hint={gatePred.confidence !== 'confirmed' ? gatePred.hint : null}
+        />
         <QuickInfoCard icon={<MapPin size={18} />} label="Terminal" value={flight.terminal ?? 'TBD'} />
         <QuickInfoCard icon={<AirplaneTilt size={18} />} label="Aircraft" value={flight.aircraft ?? 'TBD'} />
         <QuickInfoCard icon={<Tag size={18} />} label="Tail" value={flight.tailNumber ?? 'TBD'} />
@@ -555,15 +642,31 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
         </div>
       )}
 
-      {/* Delay Reasons */}
-      {prediction.delayReasons.length > 0 && (
+      {/* Delay Factors (heuristics merged with live FAA NAS advisories) */}
+      {causes.reasons.length > 0 && (
         <div className="card p-5 mb-4">
           <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3 flex items-center gap-2">
             <Clock size={16} className="text-amber-500" />
             Delay Factors
           </h3>
+
+          {/* Prominent FAA advisory banner (ground stop / ground delay). */}
+          {nas?.hasIssues && nasBannerText && (
+            <div className="mb-3 rounded-xl px-3 py-2 bg-rose-500/10 border border-rose-500/30">
+              <div className="flex items-start gap-2">
+                <Warning size={16} weight="fill" className="text-rose-500 mt-0.5 shrink-0" />
+                <div className="min-w-0">
+                  <div className="text-xs font-semibold text-rose-500">
+                    FAA advisory · {nas.airport}
+                  </div>
+                  <div className="text-xs text-[var(--text-secondary)]">{nasBannerText}</div>
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-2">
-            {prediction.delayReasons.slice(0, seeMore ? undefined : 3).map((reason, i) => (
+            {causes.reasons.slice(0, seeMore ? undefined : 3).map((reason, i) => (
               <div key={i} className="flex items-start gap-2 text-sm">
                 <span className={`mt-0.5 w-2 h-2 rounded-full shrink-0 ${
                   reason.severity === 'high' ? 'bg-rose-500' :
@@ -575,12 +678,12 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
                 </div>
               </div>
             ))}
-            {prediction.delayReasons.length > 3 && (
+            {causes.reasons.length > 3 && (
               <button
                 onClick={() => setSeeMore(!seeMore)}
                 className="text-[#007AFF] text-xs font-semibold"
               >
-                {seeMore ? 'Show less' : `Show ${prediction.delayReasons.length - 3} more`}
+                {seeMore ? 'Show less' : `Show ${causes.reasons.length - 3} more`}
               </button>
             )}
           </div>
@@ -634,36 +737,43 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
         </div>
       ) : null}
 
-      {/* Inbound Aircraft */}
-      {flight.inbound && (
-        <div className="card p-5 mb-4">
-          <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3 flex items-center gap-2">
-            <WifiHigh size={16} className="text-[#007AFF]" />
-            Inbound Aircraft
-          </h3>
-          <div className="flex items-center gap-3">
-            <div className="flex-1">
-              <div className="font-medium text-[var(--text-primary)] text-sm">
-                {flight.inbound.flightNumber}
+      {/* Airport intelligence (returns null for unknown airports) */}
+      <AirportIntelligence iata={flight.origin.iata} cityName={flight.origin.city} />
+      <AirportIntelligence iata={flight.destination.iata} cityName={flight.destination.city} />
+
+      {/* Inbound Aircraft (real prior rotation via OpenSky) */}
+      <div className="card p-5 mb-4">
+        <h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3 flex items-center gap-2">
+          <WifiHigh size={16} className="text-[#007AFF]" />
+          Inbound Aircraft
+        </h3>
+        {inbound?.found ? (
+          <>
+            <div className="flex items-center gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="font-medium text-[var(--text-primary)] text-sm truncate">
+                  {inbound.tail ?? inbound.flightIata ?? 'Unknown aircraft'}
+                </div>
+                <div className="flex items-center gap-1 text-xs text-[var(--text-secondary)] mt-0.5">
+                  <span>{inbound.originIata ?? inbound.originIcao ?? '—'}</span>
+                  <ArrowRight size={10} />
+                  <span>{inbound.destinationIcao ?? flight.origin.icao}</span>
+                </div>
               </div>
-              <div className="flex items-center gap-1 text-xs text-[var(--text-secondary)] mt-0.5">
-                <span>{flight.inbound.origin.iata}</span>
-                <ArrowRight size={10} />
-                <span>{flight.inbound.destination.iata}</span>
-              </div>
+              {inboundArrival && (
+                <div className="text-right shrink-0">
+                  <div className="text-xs text-[var(--text-tertiary)]">
+                    {inbound.arrivalActual ? 'Arrived' : 'Est.'} {formatTime(inboundArrival, flight.origin.timezone)}
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="text-right">
-              <StatusPill status={flight.inbound.status} />
-              <div className="text-xs text-[var(--text-tertiary)] mt-0.5">
-                Est. {formatTime(flight.inbound.actualArrival ?? flight.inbound.scheduledArrival)}
-              </div>
-            </div>
-          </div>
-          <div className="mt-2 text-xs text-[var(--text-tertiary)]">
-            Tail: {flight.inbound.tailNumber}
-          </div>
-        </div>
-      )}
+            <div className="mt-2 text-[11px] text-[var(--text-tertiary)]">via OpenSky</div>
+          </>
+        ) : (
+          <p className="text-xs text-[var(--text-tertiary)]">Inbound aircraft — not available yet</p>
+        )}
+      </div>
 
       {/* Arrival Forecast */}
       <ArrivalForecast
@@ -694,15 +804,35 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
         </h3>
         <div className="rounded-xl overflow-hidden h-48 relative">
           {online ? (
-            <FlightMap
-              originLat={flight.origin.lat}
-              originLon={flight.origin.lon}
-              destLat={flight.destination.lat}
-              destLon={flight.destination.lon}
-              originIata={flight.origin.iata}
-              destIata={flight.destination.iata}
-              position={flight.livePosition ?? null}
-            />
+            <>
+              <FlightMap
+                originLat={flight.origin.lat}
+                originLon={flight.origin.lon}
+                destLat={flight.destination.lat}
+                destLon={flight.destination.lon}
+                originIata={flight.origin.iata}
+                destIata={flight.destination.iata}
+                position={flight.livePosition ?? null}
+                radarTemplate={radarOn ? radarTemplate : null}
+              />
+              <button
+                onClick={() => setRadarOn((v) => !v)}
+                aria-pressed={radarOn}
+                className={`absolute top-2 right-2 z-10 flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold shadow-sm backdrop-blur-sm transition-colors ${
+                  radarOn
+                    ? 'bg-[#007AFF] text-white'
+                    : 'bg-[var(--bg-primary)]/85 text-[var(--text-primary)]'
+                }`}
+              >
+                <Broadcast size={13} weight="fill" />
+                Radar
+              </button>
+              {radarOn && radarTemplate && (
+                <span className="absolute bottom-1 left-2 z-10 text-[9px] text-[var(--text-secondary)] bg-[var(--bg-primary)]/70 rounded px-1.5 py-0.5">
+                  {RADAR_ATTRIBUTION}
+                </span>
+              )}
+            </>
           ) : (
             <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-[var(--bg-tertiary)]">
               <div className="flex items-center gap-2">
@@ -734,7 +864,11 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
   );
 }
 
-function QuickInfoCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
+function QuickInfoCard({
+  icon, label, value, hint,
+}: {
+  icon: React.ReactNode; label: string; value: string; hint?: string | null;
+}) {
   return (
     <div className="card p-3 flex items-center gap-3">
       <div className="w-9 h-9 rounded-full bg-[var(--bg-tertiary)] flex items-center justify-center shrink-0">
@@ -743,6 +877,9 @@ function QuickInfoCard({ icon, label, value }: { icon: React.ReactNode; label: s
       <div className="min-w-0">
         <div className="text-[10px] text-[var(--text-tertiary)] uppercase tracking-wider">{label}</div>
         <div className="text-sm font-semibold text-[var(--text-primary)] truncate">{value}</div>
+        {hint && (
+          <div className="text-[10px] text-[var(--text-tertiary)] leading-tight mt-0.5">{hint}</div>
+        )}
       </div>
     </div>
   );
@@ -827,12 +964,13 @@ function formatObserved(iso: string): string {
 
 /** MapLibre GL map showing the flight route with the real live aircraft position. */
 function FlightMap({
-  originLat, originLon, destLat, destLon, originIata, destIata, position,
+  originLat, originLon, destLat, destLon, originIata, destIata, position, radarTemplate,
 }: {
   originLat: number; originLon: number;
   destLat: number; destLon: number;
   originIata: string; destIata: string;
   position: LivePosition | null;
+  radarTemplate: string | null;
 }) {
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -840,6 +978,8 @@ function FlightMap({
   const loadedRef = useRef(false);
   const positionRef = useRef<LivePosition | null>(position);
   positionRef.current = position;
+  const radarTemplateRef = useRef<string | null>(radarTemplate);
+  radarTemplateRef.current = radarTemplate;
 
   // Create the map once and draw origin/destination markers + dashed route.
   useEffect(() => {
@@ -899,6 +1039,8 @@ function FlightMap({
 
       // Draw the live aircraft marker if a position is already available.
       syncPlaneMarker();
+      // Add the radar overlay if it was already toggled on before load.
+      syncRadar();
     });
 
     mapRef.current = map;
@@ -955,6 +1097,35 @@ function FlightMap({
     syncPlaneMarker();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [position]);
+
+  // Add/replace/remove the precipitation radar raster overlay above the basemap.
+  function syncRadar() {
+    const map = mapRef.current;
+    if (!map || !loadedRef.current) return;
+
+    if (map.getLayer('radar-layer')) map.removeLayer('radar-layer');
+    if (map.getSource('radar')) map.removeSource('radar');
+
+    const template = radarTemplateRef.current;
+    if (!template) return;
+
+    map.addSource('radar', { type: 'raster', tiles: [template], tileSize: 256 });
+    const beforeId = map.getLayer('route-line') ? 'route-line' : undefined;
+    map.addLayer(
+      {
+        id: 'radar-layer',
+        type: 'raster',
+        source: 'radar',
+        paint: { 'raster-opacity': 0.65 },
+      },
+      beforeId,
+    );
+  }
+
+  useEffect(() => {
+    syncRadar();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [radarTemplate]);
 
   return (
     <>
