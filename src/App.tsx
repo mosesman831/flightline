@@ -133,70 +133,18 @@ export default function App() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[var(--bg-primary)]">
+    <div className="min-h-screen">
       <OfflineBanner online={online} justReconnected={justReconnected} recoveredFresh={recoveredFresh} />
-      <Routes>
-        <Route
-          path="/"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <FlightsList
-                flights={activeFlights}
-                loading={loading}
-                refresh={refresh}
-              />
-            </Layout>
-          }
-        />
-        <Route
-          path="/flight/:id"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <FlightDetail flights={flights} />
-            </Layout>
-          }
-        />
-        <Route
-          path="/add"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <AddFlight onAdded={refresh} />
-            </Layout>
-          }
-        />
-        <Route
-          path="/add/:airline/:flightNumber/:date"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <AddFlight onAdded={refresh} />
-            </Layout>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <Settings
-                darkMode={darkMode}
-                setDarkMode={setDarkMode}
-                flights={flights}
-                refresh={refresh}
-              />
-            </Layout>
-          }
-        />
-        <Route
-          path="/archive"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <Archive
-                flights={archivedFlights}
-                refresh={refresh}
-              />
-            </Layout>
-          }
-        />
-      </Routes>
+      <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
+        <Routes>
+          <Route path="/" element={<FlightsList flights={activeFlights} loading={loading} refresh={refresh} />} />
+          <Route path="/flight/:id" element={<FlightDetail flights={flights} />} />
+          <Route path="/add" element={<AddFlight onAdded={refresh} />} />
+          <Route path="/add/:airline/:flightNumber/:date" element={<AddFlight onAdded={refresh} />} />
+          <Route path="/settings" element={<Settings darkMode={darkMode} setDarkMode={setDarkMode} flights={flights} refresh={refresh} />} />
+          <Route path="/archive" element={<Archive flights={archivedFlights} refresh={refresh} />} />
+        </Routes>
+      </Layout>
     </div>
   );
 }

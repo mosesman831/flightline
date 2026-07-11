@@ -3,9 +3,9 @@
 @tailwind utilities;
 
 :root {
-  --bg-primary: #FAFAF8;
+  --bg-primary: #F4F5FB;
   --bg-secondary: #FFFFFF;
-  --bg-tertiary: #F2F2EE;
+  --bg-tertiary: #EDEEF4;
   --text-primary: #1C1C1E;
   --text-secondary: #6E6E73;
   --text-tertiary: #AEAEB2;
@@ -17,10 +17,23 @@
   /* Glass tab bar */
   --bg-secondary-rgb: 255, 255, 255;
   --border-color-rgb: 229, 229, 224;
+
+  /* ── Liquid glass system ── */
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-bg-strong: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --glass-highlight: rgba(255, 255, 255, 0.95);
+  --glass-shadow: 0 10px 34px rgba(23, 30, 62, 0.10), 0 2px 8px rgba(23, 30, 62, 0.05);
+  --glass-shadow-hover: 0 18px 48px rgba(23, 30, 62, 0.16), 0 4px 14px rgba(23, 30, 62, 0.08);
+  --glass-blur: 22px;
+  /* Ambient background accent blobs */
+  --ambient-1: rgba(0, 122, 255, 0.20);
+  --ambient-2: rgba(90, 200, 250, 0.18);
+  --ambient-3: rgba(175, 82, 222, 0.14);
 }
 
 .dark {
-  --bg-primary: #0F0F10;
+  --bg-primary: #08080B;
   --bg-secondary: #1C1C1E;
   --bg-tertiary: #2C2C2E;
   --text-primary: #F5F5F0;
@@ -31,6 +44,16 @@
   --card-shadow-hover: 0 4px 24px rgba(0, 0, 0, 0.3), 0 1px 8px rgba(0, 0, 0, 0.15);
   --bg-secondary-rgb: 28, 28, 30;
   --border-color-rgb: 56, 56, 58;
+
+  --glass-bg: rgba(30, 30, 36, 0.52);
+  --glass-bg-strong: rgba(34, 34, 40, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-highlight: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 10px 34px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --glass-shadow-hover: 0 18px 48px rgba(0, 0, 0, 0.6), 0 4px 14px rgba(0, 0, 0, 0.4);
+  --ambient-1: rgba(0, 122, 255, 0.28);
+  --ambient-2: rgba(48, 209, 197, 0.16);
+  --ambient-3: rgba(191, 90, 242, 0.20);
 }
 
 html {
@@ -60,28 +83,94 @@ body {
 .safe-top { padding-top: var(--safe-top); }
 .safe-bottom { padding-bottom: var(--safe-bottom); }
 
-/* iOS-like card */
-.card {
-  background: var(--bg-secondary);
-  border-radius: 16px;
-  box-shadow: var(--card-shadow);
-  transition: box-shadow 0.2s ease, transform 0.2s ease;
+/* ── Liquid-glass surfaces ── */
+/* Every .card is a frosted glass pane with a specular top highlight, a
+   hairline border, and a soft ambient shadow. A ::before layer paints a
+   subtle top-down sheen so the surface reads as curved glass. */
+.card,
+.glass {
+  position: relative;
+  background: var(--glass-bg);
+  border-radius: 20px;
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), inset 0 1px 0 var(--glass-highlight);
+  backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(180%);
+  transition: box-shadow 0.28s cubic-bezier(0.32, 0.72, 0, 1),
+    transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+  isolation: isolate;
+}
+
+.card::before,
+.glass::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    160deg,
+    var(--glass-highlight) 0%,
+    rgba(255, 255, 255, 0) 42%
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.8;
+  z-index: -1;
+}
+
+.glass-strong {
+  background: var(--glass-bg-strong);
 }
 
 .card:active {
-  transform: scale(0.98);
+  transform: scale(0.985);
 }
 
 .card-hover:hover {
-  box-shadow: var(--card-shadow-hover);
+  box-shadow: var(--glass-shadow-hover), inset 0 1px 0 var(--glass-highlight);
+  transform: translateY(-2px);
 }
 
-/* iOS-style bottom tab bar */
+/* iOS-style bottom tab bar (glass) */
 .tab-bar {
-  background: var(--bg-secondary);
-  border-top: 1px solid var(--border-color);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  background: var(--glass-bg-strong);
+  border-top: 1px solid var(--glass-border);
+  backdrop-filter: blur(28px) saturate(200%);
+  -webkit-backdrop-filter: blur(28px) saturate(200%);
+}
+
+/* ── Ambient refractive background ── */
+/* A fixed, slowly-drifting mesh of accent blobs sits behind everything so the
+   glass surfaces have real color/depth to refract. */
+.ambient-bg {
+  position: fixed;
+  inset: -20% -10% -10% -10%;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(42% 38% at 18% 12%, var(--ambient-1) 0%, transparent 60%),
+    radial-gradient(46% 40% at 85% 20%, var(--ambient-2) 0%, transparent 62%),
+    radial-gradient(50% 45% at 70% 90%, var(--ambient-3) 0%, transparent 60%);
+  filter: blur(28px);
+  animation: ambient-drift 26s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+@keyframes ambient-drift {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  50% { transform: translate3d(2.5%, -2%, 0) scale(1.08); }
+  100% { transform: translate3d(-2%, 2.5%, 0) scale(1.04); }
+}
+
+/* Press feedback utility for glass buttons */
+.press {
+  transition: transform 0.18s cubic-bezier(0.32, 0.72, 0, 1);
+}
+.press:active {
+  transform: scale(0.94);
 }
 
 /* Status pill */
@@ -226,4 +315,45 @@ body {
 
 .pulse-border {
   animation: pulse-border 2s infinite;
+}
+
+/* Specular sweep for highlight moments (e.g. status change) */
+@keyframes glass-sheen {
+  0% { transform: translateX(-120%) skewX(-18deg); opacity: 0; }
+  30% { opacity: 0.55; }
+  100% { transform: translateX(220%) skewX(-18deg); opacity: 0; }
+}
+
+.sheen {
+  position: relative;
+  overflow: hidden;
+}
+.sheen::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 45%;
+  height: 100%;
+  background: linear-gradient(
+    100deg,
+    transparent,
+    rgba(255, 255, 255, 0.55),
+    transparent
+  );
+  animation: glass-sheen 2.4s cubic-bezier(0.32, 0.72, 0, 1);
+  pointer-events: none;
+}
+
+/* Respect reduced-motion: calm everything down. */
+@media (prefers-reduced-motion: reduce) {
+  .ambient-bg { animation: none; }
+  .sheen::after { animation: none; display: none; }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.08s !important;
+  }
 }
