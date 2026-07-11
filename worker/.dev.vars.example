@@ -1,0 +1,4 @@
+# Local-only provider secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
+# NEVER commit real keys. These are read as Worker secret bindings during dev.
+AVIATIONSTACK_API_KEY=
+AIRLABS_API_KEY=
