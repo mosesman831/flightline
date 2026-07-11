@@ -3,7 +3,7 @@
 // 'ok'/'error' once actually observed (never claim untested providers healthy).
 import type { Env, ProviderReport } from './types';
 
-export type ProviderKey = 'aviationstack' | 'airlabs' | 'adsb.lol' | 'opensky' | 'weather';
+export type ProviderKey = 'aviationstack' | 'airlabs' | 'adsb.lol' | 'opensky' | 'weather' | 'faa';
 
 interface ProviderState {
   lastOutcome: 'ok' | 'error' | 'unknown';
@@ -24,6 +24,7 @@ const PROVIDER_META: ProviderMeta[] = [
   { key: 'adsb.lol', name: 'ADSB.lol', requiresKey: false, data: 'Live ADS-B position (primary)' },
   { key: 'opensky', name: 'OpenSky Network', requiresKey: false, data: 'Live ADS-B position (fallback)' },
   { key: 'weather', name: 'Aviation Weather', requiresKey: false, data: 'METAR, TAF' },
+  { key: 'faa', name: 'FAA NAS Status', requiresKey: false, data: 'Ground stops, ground delays, closures, arrival/departure delays' },
 ];
 
 const state = new Map<ProviderKey, ProviderState>();

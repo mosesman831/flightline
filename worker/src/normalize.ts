@@ -225,6 +225,16 @@ export function observedAtFromEpoch(epochSeconds: unknown, nowMs: number): strin
   return new Date(epoch === null ? nowMs : epoch * 1000).toISOString();
 }
 
+// Convert absolute epoch seconds to an ISO 8601 string, or null when the value
+// is missing/non-finite. Unlike observedAtFromEpoch there is no "now" fallback.
+export function isoFromEpochSec(epochSeconds: unknown): string | null {
+  const epoch = numOrNull(epochSeconds);
+  if (epoch === null) return null;
+  const ms = epoch * 1000;
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 // A position is considered "not live" (stale) once older than 60 seconds.
 export function isPositionStale(observedAtIso: string, nowMs: number): boolean {
   const ms = Date.parse(observedAtIso);

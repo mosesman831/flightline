@@ -6,8 +6,9 @@ import { route, type AppDeps } from './router';
 import { fetchAviationstack } from './providers/aviationstack';
 import { fetchAirlabs } from './providers/airlabs';
 import { fetchAdsbPosition, searchAdsbCallsign } from './providers/adsblol';
-import { fetchOpenSky } from './providers/opensky';
+import { fetchOpenSky, fetchInboundLeg } from './providers/opensky';
 import { fetchWeather } from './providers/weather';
+import { fetchNasStatus } from './providers/faa';
 import type { CacheLike } from './cache';
 
 // Build the production dependency set, binding provider fns to env secrets and
@@ -33,6 +34,9 @@ function buildDeps(env: Env): AppDeps {
       requestId,
     },
     weather: (icao) => fetchWeather(icao, fetch, Date.now()),
+    inbound: (icao24, airportIcao, beforeMs) =>
+      fetchInboundLeg(icao24, airportIcao, beforeMs, fetch, Date.now()),
+    nas: (iata) => fetchNasStatus(iata, fetch, Date.now()),
   };
 }
 

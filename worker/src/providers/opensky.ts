@@ -1,13 +1,14 @@
 // OpenSky Network adapter — free, no key. Fallback live-position source. Raw
 // units are SI and converted to knots/feet/fpm. `last_contact` is absolute
 // epoch seconds. The state vector is a positional array.
-import type { LivePosition, ProviderResult } from '../types';
+import type { InboundLegCore, LivePosition, ProviderResult } from '../types';
 import {
   numOrNull,
   msToKnots,
   metersToFeet,
   msToFpm,
   observedAtFromEpoch,
+  isoFromEpochSec,
   isPositionStale,
 } from '../normalize';
 import { recordSuccess, recordError } from '../providerState';
@@ -90,4 +91,130 @@ export async function fetchOpenSky(
   }
   recordSuccess('opensky', nowMs);
   return { ok: true, data: pos };
+}
+
+// --- Inbound rotation (flights-by-aircraft) ---------------------------------
+// A raw OpenSky leg from /flights/aircraft. `firstSeen`/`lastSeen` are epoch s;
+// `estDepartureAirport`/`estArrivalAirport` are ICAO codes (or null).
+
+// PURE: choose the aircraft's inbound leg. Prefer the most recent leg whose
+// arrival airport matches (case-insensitive) and finished at/before `endSec`;
+// otherwise fall back to the most recent leg finished at/before `endSec`.
+export function pickInboundLeg(
+  legs: any[],
+  airportIcao: string | null,
+  endSec: number,
+): any | null {
+  if (!Array.isArray(legs)) return null;
+
+  const eligible = legs.filter((l) => {
+    if (!l || typeof l !== 'object') return false;
+    const ls = numOrNull(l.lastSeen);
+    return ls !== null && ls <= endSec;
+  });
+  if (eligible.length === 0) return null;
+
+  // Most recent first (by lastSeen).
+  const byRecent = [...eligible].sort(
+    (a, b) => (numOrNull(b.lastSeen) ?? 0) - (numOrNull(a.lastSeen) ?? 0),
+  );
+
+  if (airportIcao) {
+    const want = airportIcao.toUpperCase();
+    const match = byRecent.find(
+      (l) =>
+        typeof l.estArrivalAirport === 'string' &&
+        l.estArrivalAirport.toUpperCase() === want,
+    );
+    if (match) return match;
+  }
+
+  return byRecent[0];
+}
+
+// PURE mapper: a raw OpenSky leg -> InboundLegCore.
+export function mapInboundLeg(leg: any, icao24: string): InboundLegCore {
+  const rawCallsign = typeof leg?.callsign === 'string' ? leg.callsign.trim() : '';
+  const dep =
+    typeof leg?.estDepartureAirport === 'string' && leg.estDepartureAirport.trim()
+      ? leg.estDepartureAirport.trim()
+      : null;
+  const arr =
+    typeof leg?.estArrivalAirport === 'string' && leg.estArrivalAirport.trim()
+      ? leg.estArrivalAirport.trim()
+      : null;
+
+  return {
+    flightIata: rawCallsign || null,
+    originIcao: dep,
+    originIata: null,
+    destinationIcao: arr,
+    scheduledArrival: null,
+    arrivalEstimated: null,
+    arrivalActual: isoFromEpochSec(leg?.lastSeen),
+    icao24: (leg?.icao24 ?? icao24).toString().toLowerCase(),
+    tail: null,
+    source: 'opensky',
+  };
+}
+
+// Find the aircraft's prior leg using OpenSky's free flights-by-aircraft API.
+// Window: [before - 24h, before]. HTTPS, no key. Returns a discriminated
+// ProviderResult so the router can 404/429/502 consistently.
+export async function fetchInboundLeg(
+  icao24: string,
+  airportIcao: string | null,
+  beforeMs: number,
+  fetchImpl: FetchImpl = fetch,
+  nowMs: number = Date.now(),
+): Promise<ProviderResult<InboundLegCore>> {
+  const end = Math.floor(beforeMs / 1000);
+  const begin = end - 24 * 3600;
+  const url =
+    `https://opensky-network.org/api/flights/aircraft` +
+    `?icao24=${encodeURIComponent(icao24.toLowerCase())}` +
+    `&begin=${begin}&end=${end}`;
+
+  let resp: Response;
+  try {
+    resp = await fetchImpl(url);
+  } catch {
+    recordError('opensky', 'network error', nowMs);
+    return { ok: false, reason: 'error', message: 'network error' };
+  }
+  if (resp.status === 429) {
+    recordError('opensky', 'rate limited', nowMs);
+    return { ok: false, reason: 'rate_limited', message: 'rate limited' };
+  }
+  if (resp.status === 401 || resp.status === 403) {
+    recordError('opensky', 'authentication failed', nowMs);
+    return { ok: false, reason: 'auth', message: 'authentication failed' };
+  }
+  // OpenSky answers 404 when there are no flights in the window.
+  if (resp.status === 404) {
+    recordSuccess('opensky', nowMs);
+    return { ok: false, reason: 'no_match' };
+  }
+  if (!resp.ok) {
+    recordError('opensky', `upstream ${resp.status}`, nowMs);
+    return { ok: false, reason: 'error', message: `upstream ${resp.status}` };
+  }
+
+  let json: any;
+  try {
+    json = await resp.json();
+  } catch {
+    recordError('opensky', 'malformed response', nowMs);
+    return { ok: false, reason: 'error', message: 'malformed response' };
+  }
+
+  const legs: any[] = Array.isArray(json) ? json : [];
+  const chosen = pickInboundLeg(legs, airportIcao, end);
+  if (!chosen) {
+    recordSuccess('opensky', nowMs);
+    return { ok: false, reason: 'no_match' };
+  }
+
+  recordSuccess('opensky', nowMs);
+  return { ok: true, data: mapInboundLeg(chosen, icao24) };
 }

@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { route, type AppDeps } from '../src/router.ts';
-import type { Env, FlightBase, LivePosition, ProviderResult, NormalizedFlight } from '../src/types.ts';
+import type {
+  Env,
+  FlightBase,
+  InboundLegCore,
+  LivePosition,
+  NasStatusCore,
+  ProviderResult,
+  NormalizedFlight,
+} from '../src/types.ts';
 import type { WeatherCore } from '../src/providers/weather.ts';
 import { makeCacheStub } from './helpers.ts';
 
@@ -39,6 +47,8 @@ interface Cfg {
   callsign: { position: ProviderResult<LivePosition>; icao24: string | null };
   opensky: ProviderResult<LivePosition>;
   weather: ProviderResult<WeatherCore>;
+  inbound: ProviderResult<InboundLegCore>;
+  nas: ProviderResult<NasStatusCore>;
 }
 
 function makeAppDeps() {
@@ -50,8 +60,10 @@ function makeAppDeps() {
     callsign: { position: { ok: false, reason: 'no_match' }, icao24: null },
     opensky: { ok: false, reason: 'no_match' },
     weather: { ok: false, reason: 'no_match' },
+    inbound: { ok: false, reason: 'no_match' },
+    nas: { ok: false, reason: 'no_match' },
   };
-  const produceCount = { av: 0 };
+  const produceCount = { av: 0, inbound: 0, nas: 0 };
   const deps: AppDeps = {
     cache: makeCacheStub(),
     now: () => nowRef.ms,
@@ -66,9 +78,17 @@ function makeAppDeps() {
       requestId: () => 'req-test',
     },
     weather: async () => cfg.weather,
+    inbound: async () => { produceCount.inbound++; return cfg.inbound; },
+    nas: async () => { produceCount.nas++; return cfg.nas; },
   };
   return { deps, cfg, nowRef, produceCount };
 }
+
+const inboundFixture: InboundLegCore = {
+  flightIata: 'BAW178', originIcao: 'EGLL', originIata: null, destinationIcao: 'KJFK',
+  scheduledArrival: null, arrivalEstimated: null, arrivalActual: '2026-07-11T10:00:00.000Z',
+  icao24: 'abc123', tail: null, source: 'opensky',
+};
 
 function req(path: string, init?: RequestInit): Request {
   return new Request(`https://flightline.pages.dev${path}`, init);
@@ -231,6 +251,108 @@ test('GET /api/health does not probe upstreams', async () => {
   assert.equal(b.status, 'ok');
   assert.ok(b.version);
   assert.ok(b.timestamp);
+});
+
+const BEFORE = '2026-07-11T12:00:00.000Z';
+
+test('GET /api/inbound returns an enveloped inbound leg', async () => {
+  const { deps, cfg } = makeAppDeps();
+  cfg.inbound = { ok: true, data: inboundFixture };
+  const r = await route(req(`/api/inbound/abc123?airport=KJFK&before=${BEFORE}`), env, deps);
+  assert.equal(r.status, 200);
+  const b = r.body as any;
+  assert.equal(b.found, true);
+  assert.equal(b.flightIata, 'BAW178');
+  assert.equal(b.originIcao, 'EGLL');
+  assert.equal(b.destinationIcao, 'KJFK');
+  assert.equal(b.arrivalActual, '2026-07-11T10:00:00.000Z');
+  assert.equal(b.icao24, 'abc123');
+  assert.equal(b.stale, false);
+  assert.deepEqual(b.dataSources, ['opensky']);
+  assert.equal(b.source, 'opensky');
+  assert.ok(b.requestId && b.fetchedAt);
+});
+
+test('GET /api/inbound caches success (~300s) and separates by airport', async () => {
+  const { deps, cfg, produceCount } = makeAppDeps();
+  cfg.inbound = { ok: true, data: inboundFixture };
+  await route(req(`/api/inbound/abc123?airport=KJFK&before=${BEFORE}`), env, deps);
+  await route(req(`/api/inbound/abc123?airport=KJFK&before=${BEFORE}`), env, deps); // cache hit
+  assert.equal(produceCount.inbound, 1);
+  await route(req(`/api/inbound/abc123?airport=KLAX&before=${BEFORE}`), env, deps); // different airport
+  assert.equal(produceCount.inbound, 2);
+  assert.ok([...(deps.cache as any).store.keys()].some((k: string) => k.includes('KJFK')));
+  assert.ok([...(deps.cache as any).store.keys()].some((k: string) => k.includes('KLAX')));
+});
+
+test('GET /api/inbound empty -> 404 negative-cached (60s)', async () => {
+  const { deps, cfg, produceCount } = makeAppDeps();
+  cfg.inbound = { ok: false, reason: 'no_match' };
+  const r1 = await route(req(`/api/inbound/abc123?airport=KJFK&before=${BEFORE}`), env, deps);
+  assert.equal(r1.status, 404);
+  assert.equal((r1.body as any).code, 'not_found');
+  const r2 = await route(req(`/api/inbound/abc123?airport=KJFK&before=${BEFORE}`), env, deps); // negative cache
+  assert.equal(r2.status, 404);
+  assert.equal(produceCount.inbound, 1);
+});
+
+test('GET /api/inbound rate-limit -> 429; upstream error -> 502 (not cached)', async () => {
+  const { deps, cfg, produceCount } = makeAppDeps();
+  cfg.inbound = { ok: false, reason: 'rate_limited' };
+  assert.equal((await route(req(`/api/inbound/abc123?before=${BEFORE}`), env, deps)).status, 429);
+  cfg.inbound = { ok: false, reason: 'error' };
+  const r = await route(req(`/api/inbound/abc123?before=${BEFORE}`), env, deps);
+  assert.equal(r.status, 502);
+  // Failures are never cached: each call re-invokes the provider.
+  await route(req(`/api/inbound/abc123?before=${BEFORE}`), env, deps);
+  assert.equal(produceCount.inbound, 3);
+});
+
+test('GET /api/inbound validates icao24 and requires before', async () => {
+  const { deps } = makeAppDeps();
+  assert.equal((await route(req(`/api/inbound/zzz?before=${BEFORE}`), env, deps)).status, 400);
+  const noBefore = await route(req('/api/inbound/abc123'), env, deps);
+  assert.equal(noBefore.status, 400);
+  assert.equal((noBefore.body as any).code, 'invalid_input');
+  assert.equal((await route(req('/api/inbound/abc123?before=not-a-date'), env, deps)).status, 400);
+});
+
+test('GET /api/nas returns enveloped status with events', async () => {
+  const { deps, cfg } = makeAppDeps();
+  cfg.nas = {
+    ok: true,
+    data: {
+      airport: 'EWR', hasIssues: true,
+      events: [{ type: 'ground_stop', reason: 'weather', avgDelayMinutes: null, scope: null, endTime: null }],
+    },
+  };
+  const r = await route(req('/api/nas/EWR'), env, deps);
+  assert.equal(r.status, 200);
+  const b = r.body as any;
+  assert.equal(b.airport, 'EWR');
+  assert.equal(b.hasIssues, true);
+  assert.equal(b.events[0].type, 'ground_stop');
+  assert.equal(b.stale, false);
+  assert.equal(b.source, 'faa');
+  assert.deepEqual(b.dataSources, ['faa']);
+  assert.ok(b.requestId && b.fetchedAt);
+});
+
+test('GET /api/nas no-advisory airport -> 200 hasIssues:false', async () => {
+  const { deps, cfg } = makeAppDeps();
+  cfg.nas = { ok: true, data: { airport: 'ATL', hasIssues: false, events: [] } };
+  const r = await route(req('/api/nas/atl'), env, deps);
+  assert.equal(r.status, 200);
+  assert.equal((r.body as any).hasIssues, false);
+  assert.deepEqual((r.body as any).events, []);
+});
+
+test('GET /api/nas validates 3-letter IATA; upstream error -> 502', async () => {
+  const { deps, cfg } = makeAppDeps();
+  assert.equal((await route(req('/api/nas/EWRX'), env, deps)).status, 400);
+  assert.equal((await route(req('/api/nas/12'), env, deps)).status, 400);
+  cfg.nas = { ok: false, reason: 'error' };
+  assert.equal((await route(req('/api/nas/EWR'), env, deps)).status, 502);
 });
 
 test('unknown route -> 404 not_found', async () => {

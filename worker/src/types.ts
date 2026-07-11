@@ -124,6 +124,57 @@ export interface WeatherData {
   observedAt: string | null;
 }
 
+// The inbound-rotation core an inbound provider produces (pre-envelope). This is
+// the prior leg an aircraft flew in on, derived from OpenSky flights-by-aircraft.
+export interface InboundLegCore {
+  flightIata: string | null; // callsign, trimmed
+  originIcao: string | null; // estDepartureAirport
+  originIata: null;
+  destinationIcao: string | null; // estArrivalAirport
+  scheduledArrival: null;
+  arrivalEstimated: null;
+  arrivalActual: string | null; // absolute ISO 8601, from lastSeen
+  icao24: string;
+  tail: null;
+  source: 'opensky';
+}
+
+// The full inbound-rotation response returned by /api/inbound (adds envelope).
+export interface InboundResponse extends InboundLegCore {
+  requestId: string;
+  fetchedAt: string;
+  dataSources: string[];
+  stale: boolean;
+  found: true;
+}
+
+// FAA National Airspace System advisory types for a single airport.
+export type NasEventType = 'ground_stop' | 'ground_delay' | 'closure' | 'delay';
+
+export interface NasEvent {
+  type: NasEventType;
+  reason: string | null;
+  avgDelayMinutes: number | null;
+  scope: string | null;
+  endTime: string | null; // absolute ISO 8601 when parseable, else null
+}
+
+// The NAS-status core a FAA provider produces (pre-envelope).
+export interface NasStatusCore {
+  airport: string; // IATA, upper
+  hasIssues: boolean;
+  events: NasEvent[];
+}
+
+// The full NAS-status response returned by /api/nas (adds envelope).
+export interface NasStatusResponse extends NasStatusCore {
+  requestId: string;
+  fetchedAt: string;
+  dataSources: string[];
+  stale: boolean;
+  source: 'faa';
+}
+
 // Provider readiness reporting for /api/providers.
 export interface ProviderReport {
   name: string;

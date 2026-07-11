@@ -8,6 +8,9 @@ import type { FlightStatus } from './types';
 export const POSITION_TTL_SECONDS = 15;
 export const WEATHER_TTL_SECONDS = 600;
 export const NOT_FOUND_TTL_SECONDS = 30;
+export const INBOUND_TTL_SECONDS = 300;
+export const INBOUND_NOT_FOUND_TTL_SECONDS = 60;
+export const NAS_TTL_SECONDS = 120;
 
 // Status physical store TTL: keep the last successful copy for 15 minutes so it
 // can be served as stale-if-error after an upstream failure.
@@ -59,6 +62,15 @@ export function buildPositionKey(icao24OrCallsign: string): string {
 
 export function buildWeatherKey(icao: string): string {
   return `${CACHE_BASE}/weather/v1/${icao.toUpperCase()}`;
+}
+
+// Inbound rotation key, scoped by aircraft + target airport (or "ALL").
+export function buildInboundKey(icao24: string, airportOrAll: string): string {
+  return `${CACHE_BASE}/inbound/v1/${icao24.toLowerCase()}/${airportOrAll.toUpperCase()}`;
+}
+
+export function buildNasKey(iata: string): string {
+  return `${CACHE_BASE}/nas/v1/${iata.toUpperCase()}`;
 }
 
 // --- Cache API wrapper ------------------------------------------------------

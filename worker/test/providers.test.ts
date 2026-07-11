@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { fetchAviationstack, mapAviationstackFlight } from '../src/providers/aviationstack.ts';
 import { fetchAirlabs, mapAirlabsFlight } from '../src/providers/airlabs.ts';
 import { fetchAdsbPosition, searchAdsbCallsign, mapAdsbAircraft } from '../src/providers/adsblol.ts';
-import { fetchOpenSky, mapOpenSkyState } from '../src/providers/opensky.ts';
+import { fetchOpenSky, mapOpenSkyState, fetchInboundLeg, pickInboundLeg, mapInboundLeg } from '../src/providers/opensky.ts';
 import { fetchWeather, mapWeather } from '../src/providers/weather.ts';
+import { fetchNasStatus, parseNasEvents, parseDelayMinutes } from '../src/providers/faa.ts';
 import { jsonFetch, routedFetch, throwingFetch, blockRealFetch } from './helpers.ts';
 
 const NOW = Date.parse('2026-07-11T12:00:00.000Z');
@@ -181,4 +182,176 @@ test('weather fetch: ok combines METAR + TAF; missing both -> no_match', async (
 
   const empty = routedFetch([{ match: 'metar', body: [] }, { match: 'taf', body: [] }]);
   assert.equal((await fetchWeather('ZZZZ', empty, NOW) as any).reason, 'no_match');
+});
+
+// --- OpenSky inbound rotation ----------------------------------------------
+
+const END_SEC = Math.floor(NOW / 1000);
+const inboundLegs = [
+  { icao24: 'abc123', firstSeen: END_SEC - 9000, estDepartureAirport: 'EGLL', lastSeen: END_SEC - 7200, estArrivalAirport: 'KJFK', callsign: 'BAW178  ' }, // older KJFK
+  { icao24: 'abc123', firstSeen: END_SEC - 5400, estDepartureAirport: 'EGLL', lastSeen: END_SEC - 3600, estArrivalAirport: 'kjfk', callsign: 'BAW179' }, // recent KJFK (lowercase)
+  { icao24: 'abc123', firstSeen: END_SEC - 3200, estDepartureAirport: 'KBOS', lastSeen: END_SEC - 1800, estArrivalAirport: 'KLAX', callsign: 'AAL1' }, // most recent overall
+  { icao24: 'abc123', firstSeen: END_SEC - 100, estDepartureAirport: 'KLAX', lastSeen: END_SEC + 500, estArrivalAirport: 'KSEA', callsign: 'FUTURE' }, // finishes after end (excluded)
+];
+
+test('pickInboundLeg prefers most-recent airport match (case-insensitive), else most-recent leg', () => {
+  const byAirport = pickInboundLeg(inboundLegs, 'KJFK', END_SEC);
+  assert.equal(byAirport.callsign, 'BAW179'); // recent KJFK, not the older one, not the future leg
+  const fallback = pickInboundLeg(inboundLegs, null, END_SEC);
+  assert.equal(fallback.callsign, 'AAL1'); // most recent finished at/before end
+  const noAirportMatch = pickInboundLeg(inboundLegs, 'EDDF', END_SEC);
+  assert.equal(noAirportMatch.callsign, 'AAL1'); // falls back when airport not present
+  assert.equal(pickInboundLeg([], 'KJFK', END_SEC), null);
+});
+
+test('mapInboundLeg maps callsign/airports and lastSeen epoch -> ISO', () => {
+  const leg = inboundLegs[1];
+  const core = mapInboundLeg(leg, 'abc123');
+  assert.equal(core.flightIata, 'BAW179'); // trimmed
+  assert.equal(core.originIcao, 'EGLL');
+  assert.equal(core.originIata, null);
+  assert.equal(core.destinationIcao, 'kjfk');
+  assert.equal(core.arrivalActual, new Date((END_SEC - 3600) * 1000).toISOString());
+  assert.equal(core.icao24, 'abc123');
+  assert.equal(core.tail, null);
+  assert.equal(core.source, 'opensky');
+
+  const empty = mapInboundLeg({ icao24: 'abc123', lastSeen: null, estDepartureAirport: null, estArrivalAirport: null, callsign: '   ' }, 'abc123');
+  assert.equal(empty.flightIata, null);
+  assert.equal(empty.originIcao, null);
+  assert.equal(empty.arrivalActual, null);
+});
+
+test('fetchInboundLeg: ok / empty->no_match / 404->no_match / 429 / timeout', async () => {
+  const before = NOW;
+  const okr = await fetchInboundLeg('abc123', 'KJFK', before, jsonFetch(200, inboundLegs), NOW);
+  assert.equal(okr.ok, true);
+  if (okr.ok) assert.equal(okr.data.flightIata, 'BAW179');
+
+  assert.equal((await fetchInboundLeg('abc123', 'KJFK', before, jsonFetch(200, []), NOW) as any).reason, 'no_match');
+  assert.equal((await fetchInboundLeg('abc123', 'KJFK', before, jsonFetch(404, {}), NOW) as any).reason, 'no_match');
+  assert.equal((await fetchInboundLeg('abc123', 'KJFK', before, jsonFetch(429, {}), NOW) as any).reason, 'rate_limited');
+  assert.equal((await fetchInboundLeg('abc123', 'KJFK', before, throwingFetch(), NOW) as any).reason, 'error');
+});
+
+// --- FAA NAS status ---------------------------------------------------------
+
+const xmlFetch = (status: number, xml: string): typeof fetch =>
+  (async () => new Response(xml, { status, headers: { 'Content-Type': 'text/xml' } })) as unknown as typeof fetch;
+
+const NAS_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<AIRPORT_STATUS_INFORMATION>
+  <Update_Time>Sat Jul 11 12:00:00 2026 GMT</Update_Time>
+  <Dtd_File>http://www.fly.faa.gov/AirportStatus.dtd</Dtd_File>
+  <Delay_type>
+    <Name>Ground Stop Programs</Name>
+    <Ground_Stop_List>
+      <Program>
+        <ARPT>EWR</ARPT>
+        <Reason>weather / thunderstorms</Reason>
+        <End_Time>2026-07-11T13:30:00Z</End_Time>
+      </Program>
+    </Ground_Stop_List>
+  </Delay_type>
+  <Delay_type>
+    <Name>Ground Delay Programs</Name>
+    <Ground_Delay_List>
+      <Ground_Delay>
+        <ARPT>SFO</ARPT>
+        <Reason>runway construction</Reason>
+        <Avg>38 minutes</Avg>
+        <Max>1 hour and 30 minutes</Max>
+      </Ground_Delay>
+    </Ground_Delay_List>
+  </Delay_type>
+  <Delay_type>
+    <Name>Airport Closures</Name>
+    <Airport_Closure_List>
+      <Airport>
+        <ARPT>GPT</ARPT>
+        <Reason>snow &amp; ice</Reason>
+        <Start>Jul 11 at 05:45 UTC.</Start>
+        <Reopen>2026-07-12T11:00:00Z</Reopen>
+      </Airport>
+    </Airport_Closure_List>
+  </Delay_type>
+  <Delay_type>
+    <Name>General Arrival/Departure Delay Info</Name>
+    <Arrival_Departure_Delay_List>
+      <Delay>
+        <ARPT>LGA</ARPT>
+        <Reason>wind</Reason>
+        <Arrival_Departure Type="Arrival">
+          <Min>15 minutes</Min>
+          <Max>45 minutes</Max>
+        </Arrival_Departure>
+      </Delay>
+    </Arrival_Departure_Delay_List>
+  </Delay_type>
+</AIRPORT_STATUS_INFORMATION>`;
+
+test('parseDelayMinutes handles minutes, hours, combined, and none', () => {
+  assert.equal(parseDelayMinutes('38 minutes'), 38);
+  assert.equal(parseDelayMinutes('1 hour and 30 minutes'), 90);
+  assert.equal(parseDelayMinutes('2 hours'), 120);
+  assert.equal(parseDelayMinutes('45'), 45);
+  assert.equal(parseDelayMinutes(''), null);
+  assert.equal(parseDelayMinutes('no delay reported'), null);
+  assert.equal(parseDelayMinutes(undefined), null);
+});
+
+test('parseNasEvents extracts ground stop for EWR', () => {
+  const events = parseNasEvents(NAS_XML, 'EWR');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'ground_stop');
+  assert.equal(events[0].reason, 'weather / thunderstorms');
+  assert.equal(events[0].endTime, '2026-07-11T13:30:00Z');
+  assert.equal(events[0].avgDelayMinutes, null);
+});
+
+test('parseNasEvents extracts ground delay with average minutes', () => {
+  const events = parseNasEvents(NAS_XML, 'SFO');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'ground_delay');
+  assert.equal(events[0].avgDelayMinutes, 38);
+  assert.equal(events[0].reason, 'runway construction');
+});
+
+test('parseNasEvents extracts closure (entity-decoded) and arrival/departure delay', () => {
+  const closure = parseNasEvents(NAS_XML, 'GPT');
+  assert.equal(closure[0].type, 'closure');
+  assert.equal(closure[0].reason, 'snow & ice');
+  assert.equal(closure[0].endTime, '2026-07-12T11:00:00Z');
+
+  const delay = parseNasEvents(NAS_XML, 'LGA');
+  assert.equal(delay[0].type, 'delay');
+  assert.equal(delay[0].scope, 'Arrival');
+  assert.equal(delay[0].avgDelayMinutes, 45); // prefers Max
+});
+
+test('parseNasEvents: airport with no advisory -> []', () => {
+  assert.deepEqual(parseNasEvents(NAS_XML, 'MIA'), []);
+  assert.deepEqual(parseNasEvents('', 'EWR'), []);
+  assert.deepEqual(parseNasEvents('<garbage/>', 'EWR'), []);
+});
+
+test('fetchNasStatus: ok w/ issues, ok no-advisory, rate limit, upstream error, timeout', async () => {
+  const withIssues = await fetchNasStatus('EWR', xmlFetch(200, NAS_XML), NOW);
+  assert.equal(withIssues.ok, true);
+  if (withIssues.ok) {
+    assert.equal(withIssues.data.airport, 'EWR');
+    assert.equal(withIssues.data.hasIssues, true);
+    assert.equal(withIssues.data.events[0].type, 'ground_stop');
+  }
+
+  const clear = await fetchNasStatus('MIA', xmlFetch(200, NAS_XML), NOW);
+  assert.equal(clear.ok, true);
+  if (clear.ok) {
+    assert.equal(clear.data.hasIssues, false);
+    assert.deepEqual(clear.data.events, []);
+  }
+
+  assert.equal((await fetchNasStatus('EWR', xmlFetch(429, ''), NOW) as any).reason, 'rate_limited');
+  assert.equal((await fetchNasStatus('EWR', xmlFetch(500, ''), NOW) as any).reason, 'error');
+  assert.equal((await fetchNasStatus('EWR', throwingFetch(), NOW) as any).reason, 'error');
 });

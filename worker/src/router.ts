@@ -1,6 +1,15 @@
 // Route matching + handlers. Handlers are pure with respect to injected deps
 // (cache + provider fns) so the whole request pipeline is import-testable.
-import type { Env, LivePosition, NormalizedFlight, WeatherData } from './types';
+import type {
+  Env,
+  InboundLegCore,
+  InboundResponse,
+  LivePosition,
+  NasStatusCore,
+  NasStatusResponse,
+  NormalizedFlight,
+  WeatherData,
+} from './types';
 import {
   validateTrackInput,
   validateIataNumber,
@@ -12,6 +21,8 @@ import {
   buildStatusKey,
   buildPositionKey,
   buildWeatherKey,
+  buildInboundKey,
+  buildNasKey,
   readCached,
   writeCached,
   statusTtlSeconds,
@@ -20,6 +31,9 @@ import {
   POSITION_TTL_SECONDS,
   WEATHER_TTL_SECONDS,
   NOT_FOUND_TTL_SECONDS,
+  INBOUND_TTL_SECONDS,
+  INBOUND_NOT_FOUND_TTL_SECONDS,
+  NAS_TTL_SECONDS,
 } from './cache';
 import { getFlightSnapshot, type FlightServiceDeps } from './flightService';
 import { buildProviderReports } from './providerState';
@@ -34,6 +48,12 @@ export interface AppDeps {
   requestId: () => string;
   flight: FlightServiceDeps;
   weather: (icao: string) => Promise<ProviderResult<WeatherCore>>;
+  inbound: (
+    icao24: string,
+    airportIcao: string | null,
+    beforeMs: number,
+  ) => Promise<ProviderResult<InboundLegCore>>;
+  nas: (iata: string) => Promise<ProviderResult<NasStatusCore>>;
 }
 
 export interface RouteResult {
@@ -235,6 +255,101 @@ async function serveWeather(deps: AppDeps, icao: string): Promise<RouteResult> {
   return { status: 502, body: errorBody('Weather provider unavailable', 'providers_unavailable') };
 }
 
+// --- Inbound rotation endpoint ----------------------------------------------
+
+async function serveInbound(
+  deps: AppDeps,
+  icao24: string,
+  airportIcao: string | null,
+  beforeMs: number,
+): Promise<RouteResult> {
+  const now = deps.now();
+  const key = buildInboundKey(icao24, airportIcao ?? 'ALL');
+
+  const cached = await readCached<InboundResponse | ErrorBody>(deps.cache, key, now);
+  if (cached && cached.fresh) {
+    if (cached.negative) return { status: 404, body: cached.data as ErrorBody };
+    return { status: 200, body: { ...(cached.data as InboundResponse), stale: false } };
+  }
+
+  const result = await deps.inbound(icao24, airportIcao, beforeMs);
+  if (result.ok) {
+    const body: InboundResponse = {
+      requestId: deps.requestId(),
+      fetchedAt: new Date(now).toISOString(),
+      dataSources: ['opensky'],
+      stale: false,
+      found: true,
+      ...result.data,
+    };
+    await writeCached(deps.cache, key, body, {
+      logicalTtl: INBOUND_TTL_SECONDS,
+      physicalTtl: INBOUND_TTL_SECONDS,
+      nowMs: now,
+    });
+    return { status: 200, body };
+  }
+
+  // Empty/none from OpenSky: confirmed not-found -> negative-cache briefly.
+  if (result.reason === 'no_match') {
+    const body = errorBody('No inbound leg found for that aircraft', 'not_found');
+    await writeCached(deps.cache, key, body, {
+      logicalTtl: INBOUND_NOT_FOUND_TTL_SECONDS,
+      physicalTtl: INBOUND_NOT_FOUND_TTL_SECONDS,
+      nowMs: now,
+      negative: true,
+    });
+    return { status: 404, body };
+  }
+
+  // Upstream failures are never negative-cached.
+  if (result.reason === 'rate_limited') {
+    return { status: 429, body: errorBody('OpenSky is rate-limited', 'rate_limited') };
+  }
+  return { status: 502, body: errorBody('OpenSky is unavailable', 'providers_unavailable') };
+}
+
+// --- NAS status endpoint ----------------------------------------------------
+
+async function serveNas(deps: AppDeps, iata: string): Promise<RouteResult> {
+  const now = deps.now();
+  const key = buildNasKey(iata);
+
+  const cached = await readCached<NasStatusResponse>(deps.cache, key, now);
+  if (cached && cached.fresh && !cached.negative) {
+    return { status: 200, body: { ...(cached.data as NasStatusResponse), stale: false } };
+  }
+
+  const result = await deps.nas(iata);
+  if (result.ok) {
+    const body: NasStatusResponse = {
+      requestId: deps.requestId(),
+      fetchedAt: new Date(now).toISOString(),
+      dataSources: ['faa'],
+      stale: false,
+      source: 'faa',
+      ...result.data,
+    };
+    await writeCached(deps.cache, key, body, {
+      logicalTtl: NAS_TTL_SECONDS,
+      physicalTtl: NAS_TTL_SECONDS,
+      nowMs: now,
+    });
+    return { status: 200, body };
+  }
+
+  if (result.reason === 'rate_limited') {
+    return { status: 429, body: errorBody('FAA NAS status is rate-limited', 'rate_limited') };
+  }
+
+  // Upstream unreachable: prefer graceful degradation by serving the last good
+  // copy as stale; otherwise surface 502.
+  if (cached && !cached.negative) {
+    return { status: 200, body: { ...(cached.data as NasStatusResponse), stale: true } };
+  }
+  return { status: 502, body: errorBody('FAA NAS status is unavailable', 'providers_unavailable') };
+}
+
 // --- Router -----------------------------------------------------------------
 
 export async function route(request: Request, env: Env, deps: AppDeps): Promise<RouteResult> {
@@ -296,6 +411,38 @@ export async function route(request: Request, env: Env, deps: AppDeps): Promise<
     const icao = decodeURIComponent(weatherMatch[1]);
     if (!isIcaoAirport(icao)) return { status: 400, body: errorBody('icao must be a 4-letter airport code', 'invalid_input') };
     return serveWeather(deps, icao.toUpperCase());
+  }
+
+  // GET /api/inbound/:icao24?airport=ICAO&before=ISO
+  const inboundMatch = path.match(/^\/api\/inbound\/([^/]+)$/);
+  if (inboundMatch) {
+    if (method !== 'GET') return { status: 405, body: errorBody('Method not allowed', 'invalid_input') };
+    const icao24 = decodeURIComponent(inboundMatch[1]);
+    if (!isHex24(icao24)) {
+      return { status: 400, body: errorBody('icao24 must be a 6-character hex string', 'invalid_input') };
+    }
+    const before = url.searchParams.get('before');
+    if (!before) {
+      return { status: 400, body: errorBody('before query parameter is required', 'invalid_input') };
+    }
+    const beforeMs = Date.parse(before);
+    if (Number.isNaN(beforeMs)) {
+      return { status: 400, body: errorBody('before must be a valid ISO 8601 datetime', 'invalid_input') };
+    }
+    const airportRaw = url.searchParams.get('airport');
+    const airportIcao = airportRaw && airportRaw.trim() ? airportRaw.trim().toUpperCase() : null;
+    return serveInbound(deps, icao24.toLowerCase(), airportIcao, beforeMs);
+  }
+
+  // GET /api/nas/:iata
+  const nasMatch = path.match(/^\/api\/nas\/([^/]+)$/);
+  if (nasMatch) {
+    if (method !== 'GET') return { status: 405, body: errorBody('Method not allowed', 'invalid_input') };
+    const iata = decodeURIComponent(nasMatch[1]).trim();
+    if (!/^[A-Za-z]{3}$/.test(iata)) {
+      return { status: 400, body: errorBody('iata must be a 3-letter airport code', 'invalid_input') };
+    }
+    return serveNas(deps, iata.toUpperCase());
   }
 
   // GET /api/providers
