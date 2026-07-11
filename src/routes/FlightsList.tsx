@@ -1,11 +1,21 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
+import { ArrowsDownUp } from '@phosphor-icons/react';
 import FlightCard from '../components/FlightCard';
 import EmptyState from '../components/EmptyState';
-import { groupFlightsByDate } from '../utils/format';
+import { formatDate, cn } from '../utils/format';
+import { groupIntoTrips, computeConnection } from '../utils/trips';
+import type { ConnectionStatus } from '../utils/trips';
 import { hapticMedium } from '../utils/haptic';
 import type { Flight } from '../types/flight';
+
+const CONNECTION_STYLES: Record<ConnectionStatus, string> = {
+  comfortable: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400',
+  close: 'bg-blue-500/10 text-blue-600 dark:text-blue-400',
+  tight: 'bg-amber-500/10 text-amber-600 dark:text-amber-400',
+  impossible: 'bg-rose-500/10 text-rose-600 dark:text-rose-400',
+};
 
 interface FlightsListProps {
   flights: Flight[];
@@ -32,7 +42,7 @@ export default function FlightsList({ flights, loading, refresh }: FlightsListPr
     day: 'numeric',
   });
 
-  const grouped = groupFlightsByDate(flights);
+  const trips = groupIntoTrips(flights);
 
   const handleRefresh = useCallback(async () => {
     if (refreshingRef.current) return;
@@ -215,30 +225,67 @@ export default function FlightsList({ flights, loading, refresh }: FlightsListPr
         </div>
       </div>
 
-      {/* Flight groups by date with staggered animations */}
+      {/* Flight groups by trip with staggered animations */}
       <AnimatePresence mode="popLayout">
-        {Array.from(grouped.entries()).map(([dateLabel, dateFlights], groupIndex) => (
-          <div key={dateLabel} className="mb-4">
-            <h2 className="text-sm font-semibold text-[var(--text-secondary)] uppercase tracking-wider mb-2 px-1">
-              {dateLabel}
-            </h2>
-            {(dateFlights as Flight[]).map((flight, flightIndex) => (
-              <motion.div
-                key={flight.id}
-                layout
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, scale: 0.95 }}
-                transition={{ duration: 0.2, delay: (groupIndex + flightIndex) * 0.03 }}
-              >
-                <FlightCard
-                  flight={flight}
-                  onClick={() => navigate(`/flight/${flight.id}`)}
-                />
-              </motion.div>
-            ))}
-          </div>
-        ))}
+        {(() => {
+          let cardIndex = 0;
+          return trips.map((trip) => {
+            const isMulti = trip.flights.length > 1;
+            return (
+              <div key={trip.id} className="mb-4">
+                {isMulti ? (
+                  <div className="flex items-baseline gap-2 mb-2 px-1">
+                    <span className="text-sm font-semibold text-[var(--text-primary)]">
+                      {trip.label}
+                    </span>
+                    <span className="text-xs text-[var(--text-tertiary)]">
+                      Trip &middot; {trip.flights.length} flights
+                    </span>
+                  </div>
+                ) : (
+                  <h2 className="text-sm font-semibold text-[var(--text-secondary)] uppercase tracking-wider mb-2 px-1">
+                    {formatDate(trip.flights[0].date)}
+                  </h2>
+                )}
+                {trip.flights.map((flight, legIndex) => {
+                  const delay = cardIndex * 0.03;
+                  cardIndex += 1;
+                  const prevLeg = legIndex > 0 ? trip.flights[legIndex - 1] : null;
+                  const connection = prevLeg ? computeConnection(prevLeg, flight) : null;
+                  return (
+                    <Fragment key={flight.id}>
+                      {connection && (
+                        <div className="flex items-center justify-center -mt-1 mb-3 px-1">
+                          <span
+                            className={cn(
+                              'inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium',
+                              CONNECTION_STYLES[connection.status],
+                            )}
+                          >
+                            <ArrowsDownUp size={13} weight="bold" />
+                            {connection.label}
+                          </span>
+                        </div>
+                      )}
+                      <motion.div
+                        layout
+                        initial={{ opacity: 0, y: 12 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        transition={{ duration: 0.2, delay }}
+                      >
+                        <FlightCard
+                          flight={flight}
+                          onClick={() => navigate(`/flight/${flight.id}`)}
+                        />
+                      </motion.div>
+                    </Fragment>
+                  );
+                })}
+              </div>
+            );
+          });
+        })()}
       </AnimatePresence>
     </div>
   );

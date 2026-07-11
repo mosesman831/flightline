@@ -1,14 +1,20 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { addDemoFlightsIfEmpty, getAllFlights, subscribeFlights } from './store/flightStore';
 import { useFlightPolling } from './utils/useFlightPolling';
+import { refreshAllDue } from './utils/refresh';
+import { useOnlineStatus } from './utils/useOnlineStatus';
+import { rebuildNotificationTimers, clearAllTimers } from './utils/notificationScheduler';
+import { loadPrefs } from './utils/notificationPrefs';
 import type { Flight } from './types/flight';
+import OfflineBanner from './components/OfflineBanner';
 import Layout from './components/Layout';
 import FlightsList from './routes/FlightsList';
 import FlightDetail from './routes/FlightDetail';
 import AddFlight from './routes/AddFlight';
 import Settings from './routes/Settings';
 import Archive from './routes/Archive';
+import Passport from './routes/Passport';
 
 export default function App() {
   const [flights, setFlights] = useState<Flight[]>([]);
@@ -63,8 +69,39 @@ export default function App() {
   const activeFlights = flights.filter((f) => !f.archived);
   const archivedFlights = flights.filter((f) => f.archived);
 
-  // Poll for live flight data updates every 60 seconds
-  useFlightPolling(activeFlights, 60_000);
+  // Visibility-aware live polling (per-flight cadence handled internally)
+  useFlightPolling(activeFlights);
+
+  // Rebuild smart-notification timers whenever flights or preferences change.
+  useEffect(() => {
+    rebuildNotificationTimers({ flights: activeFlights, prefs: loadPrefs() });
+    const onPrefs = () => rebuildNotificationTimers({ flights: activeFlights, prefs: loadPrefs() });
+    window.addEventListener('flightline-prefs-changed', onPrefs);
+    return () => window.removeEventListener('flightline-prefs-changed', onPrefs);
+  }, [activeFlights]);
+
+  useEffect(() => () => clearAllTimers(), []);
+
+  // Offline / reconnect handling.
+  const online = useOnlineStatus();
+  const [justReconnected, setJustReconnected] = useState(false);
+  const [recoveredFresh, setRecoveredFresh] = useState(false);
+  const wasOnline = useRef(online);
+  useEffect(() => {
+    if (online && !wasOnline.current) {
+      // Just came back online: run one bounded refresh and surface the outcome.
+      setJustReconnected(true);
+      setRecoveredFresh(false);
+      void refreshAllDue({ force: true }).then(() => {
+        setRecoveredFresh(true);
+        loadFlights();
+      });
+      const t = setTimeout(() => setJustReconnected(false), 4000);
+      wasOnline.current = online;
+      return () => clearTimeout(t);
+    }
+    wasOnline.current = online;
+  }, [online]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -76,7 +113,8 @@ export default function App() {
       switch (e.key.toLowerCase()) {
         case 'r':
           e.preventDefault();
-          refresh();
+          // Force a real network refresh, then reload from the store.
+          void refreshAllDue({ force: true }).then(refresh);
           break;
         case 'n':
           e.preventDefault();
@@ -96,69 +134,19 @@ export default function App() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-[var(--bg-primary)]">
-      <Routes>
-        <Route
-          path="/"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <FlightsList
-                flights={activeFlights}
-                loading={loading}
-                refresh={refresh}
-              />
-            </Layout>
-          }
-        />
-        <Route
-          path="/flight/:id"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <FlightDetail flights={flights} />
-            </Layout>
-          }
-        />
-        <Route
-          path="/add"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <AddFlight onAdded={refresh} />
-            </Layout>
-          }
-        />
-        <Route
-          path="/add/:airline/:flightNumber/:date"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <AddFlight onAdded={refresh} />
-            </Layout>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <Settings
-                darkMode={darkMode}
-                setDarkMode={setDarkMode}
-                flights={flights}
-                refresh={refresh}
-              />
-            </Layout>
-          }
-        />
-        <Route
-          path="/archive"
-          element={
-            <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
-              <Archive
-                flights={archivedFlights}
-                refresh={refresh}
-              />
-            </Layout>
-          }
-        />
-      </Routes>
+    <div className="min-h-screen">
+      <OfflineBanner online={online} justReconnected={justReconnected} recoveredFresh={recoveredFresh} />
+      <Layout darkMode={darkMode} setDarkMode={setDarkMode}>
+        <Routes>
+          <Route path="/" element={<FlightsList flights={activeFlights} loading={loading} refresh={refresh} />} />
+          <Route path="/flight/:id" element={<FlightDetail flights={flights} />} />
+          <Route path="/add" element={<AddFlight onAdded={refresh} />} />
+          <Route path="/add/:airline/:flightNumber/:date" element={<AddFlight onAdded={refresh} />} />
+          <Route path="/settings" element={<Settings darkMode={darkMode} setDarkMode={setDarkMode} flights={flights} refresh={refresh} />} />
+          <Route path="/archive" element={<Archive flights={archivedFlights} refresh={refresh} />} />
+          <Route path="/passport" element={<Passport flights={flights} />} />
+        </Routes>
+      </Layout>
     </div>
   );
 }

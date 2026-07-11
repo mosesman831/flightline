@@ -56,6 +56,22 @@ export interface PilotData {
   temperature: number | null;
 }
 
+// Normalized live ADS-B position (mirrors the Worker contract).
+export interface LivePosition {
+  icao24: string;
+  callsign: string | null;
+  latitude: number;
+  longitude: number;
+  altitudeFt: number | null;
+  groundSpeedKt: number | null;
+  heading: number | null;
+  verticalRateFpm: number | null;
+  onGround: boolean;
+  observedAt: string;
+  stale: boolean;
+  source: 'adsb.lol' | 'opensky';
+}
+
 export interface WeatherForecast {
   time: string;
   tempC: number;
@@ -107,6 +123,18 @@ export interface Flight {
   isDemo: boolean;
   archived: boolean;
   starred: boolean;
+  // ── Live-data metadata (Days 1-3 sprint; all optional for back-compat) ──
+  canonicalKey?: string; // YYYY-MM-DD:IATA_NUMBER
+  iataNumber?: string; // full IATA number e.g. BA178
+  statusSource?: string | null;
+  positionSource?: string | null;
+  dataSources?: string[];
+  livePosition?: LivePosition | null;
+  positionUpdatedAt?: string | null;
+  lastLiveAttemptAt?: string | null;
+  lastLiveSuccessAt?: string | null;
+  isStale?: boolean;
+  lastLiveError?: string | null;
 }
 
 export interface Trip {

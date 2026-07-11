@@ -1,45 +1,51 @@
-import { useEffect, useRef, useCallback } from 'react';
-import { enrichFlightWithLiveData } from './flightData';
-import { saveFlight, notifyFlightsChanged } from '../store/flightStore';
+import { useEffect } from 'react';
 import type { Flight } from '../types/flight';
+import { refreshAllDue, shouldPoll } from './refresh';
 
-export function useFlightPolling(
-  flights: Flight[],
-  intervalMs: number = 60_000 // 1 minute default
-) {
-  const intervalRef = useRef<ReturnType<typeof setInterval>>();
-
-  const refresh = useCallback(async () => {
-    for (const flight of flights) {
-      if (flight.isDemo || flight.archived) continue;
-      try {
-        const enriched = await enrichFlightWithLiveData(flight);
-        // Only save if something changed
-        if (
-          enriched.gate !== flight.gate ||
-          enriched.terminal !== flight.terminal ||
-          enriched.status !== flight.status ||
-          enriched.delayMinutes !== flight.delayMinutes
-        ) {
-          await saveFlight(enriched);
-        }
-      } catch {
-        // Skip on error
-      }
-    }
-    notifyFlightsChanged();
-  }, [flights]);
+/**
+ * Visibility-aware status polling for all active flights.
+ *
+ * - Runs only while the document is visible.
+ * - Each flight refreshes on its own cadence (60s inside the T-3h window,
+ *   5 min for scheduled flights more than three hours out) via the shared
+ *   refresh pipeline; terminal/archived/demo flights are skipped.
+ * - Triggers an immediate due-refresh on reconnect and on window focus.
+ */
+export function useFlightPolling(flights: Flight[]) {
+  const hasPollable = flights.some(shouldPoll);
 
   useEffect(() => {
-    // Initial refresh after 2 seconds
-    const timeout = setTimeout(refresh, 2000);
+    if (!hasPollable) return;
 
-    // Then poll at interval
-    intervalRef.current = setInterval(refresh, intervalMs);
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      if (document.visibilityState !== 'visible') return;
+      void refreshAllDue();
+    };
+
+    // Kick once shortly after mount, then poll on a coarse cadence; each flight's
+    // own interval gates whether it actually refreshes.
+    const initial = setTimeout(tick, 1500);
+    const interval = setInterval(tick, 20_000);
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void refreshAllDue();
+    };
+    const onOnline = () => void refreshAllDue({ force: true });
+    const onFocus = () => void refreshAllDue();
+
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('focus', onFocus);
 
     return () => {
-      clearTimeout(timeout);
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      cancelled = true;
+      clearTimeout(initial);
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('focus', onFocus);
     };
-  }, [refresh, intervalMs]);
+  }, [hasPollable]);
 }

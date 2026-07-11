@@ -1,67 +1,97 @@
-// Weather providers — both FREE, no key needed
-// aviationweather.gov: METAR, TAF, NOTAMs
-// Open-Meteo: general weather forecasts
+// Aviation weather adapter (aviationweather.gov) — free, no key. Returns
+// normalized METAR + TAF only (no forecast). HTTPS.
+import type { ProviderResult } from '../types';
+import { numOrNull, statuteMilesToKm, observedAtFromEpoch } from '../normalize';
+import { recordSuccess, recordError } from '../providerState';
+import type { FetchImpl } from './aviationstack';
 
-export async function fetchMetar(airportIcao: string): Promise<import('../types').WeatherData> {
-  const url = `https://aviationweather.gov/api/data/metar?ids=${airportIcao}&format=json`;
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return emptyWeather(airportIcao);
-    const json = (await resp.json()) as any;
-    const metar = json[0];
-    if (!metar) return emptyWeather(airportIcao);
+// The weather payload fields (envelope added by the router).
+export interface WeatherCore {
+  airport: string;
+  metar: string | null;
+  taf: string | null;
+  windSpeedKts: number | null;
+  windGustKts: number | null;
+  visibilityKm: number | null;
+  temperatureC: number | null;
+  observedAt: string | null;
+}
+
+// Parse the leading numeric portion of an aviationweather visibility value
+// (e.g. "10+" or 6). Returns statute miles or null.
+function parseVisibMiles(raw: unknown): number | null {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === 'string') {
+    const m = raw.match(/-?\d+(\.\d+)?/);
+    return m ? parseFloat(m[0]) : null;
+  }
+  return null;
+}
+
+// PURE mapper: raw METAR record + raw TAF string -> WeatherCore.
+export function mapWeather(icao: string, metar: any, taf: string | null, nowMs: number): WeatherCore {
+  if (!metar || typeof metar !== 'object') {
     return {
-      airport: airportIcao,
-      metar: metar.rawOb || null,
-      taf: null,
-      windSpeed: metar.wspd || null,
-      windGust: metar.wgst || null,
-      visibility: metar.visib || null,
-      temperature: metar.temp || null,
-      condition: metar.wxString || 'CLR',
-      fetchedAt: new Date().toISOString(),
+      airport: icao,
+      metar: null,
+      taf: taf ?? null,
+      windSpeedKts: null,
+      windGustKts: null,
+      visibilityKm: null,
+      temperatureC: null,
+      observedAt: null,
     };
-  } catch {
-    return emptyWeather(airportIcao);
   }
-}
-
-export async function fetchTaf(airportIcao: string): Promise<string | null> {
-  const url = `https://aviationweather.gov/api/data/taf?ids=${airportIcao}&format=json`;
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return null;
-    const json = (await resp.json()) as any;
-    return json[0]?.rawTAF || null;
-  } catch {
-    return null;
-  }
-}
-
-export async function fetchWeatherForecast(
-  lat: number,
-  lon: number
-): Promise<any> {
-  const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m&timezone=auto&forecast_days=3`;
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) return null;
-    return await resp.json();
-  } catch {
-    return null;
-  }
-}
-
-function emptyWeather(airport: string): import('../types').WeatherData {
   return {
-    airport,
-    metar: null,
-    taf: null,
-    windSpeed: null,
-    windGust: null,
-    visibility: null,
-    temperature: null,
-    condition: 'Unknown',
-    fetchedAt: new Date().toISOString(),
+    airport: icao,
+    metar: metar.rawOb ?? null,
+    taf: taf ?? null,
+    windSpeedKts: numOrNull(metar.wspd),
+    windGustKts: numOrNull(metar.wgst),
+    visibilityKm: statuteMilesToKm(parseVisibMiles(metar.visib)),
+    temperatureC: numOrNull(metar.temp),
+    observedAt: metar.obsTime != null ? observedAtFromEpoch(metar.obsTime, nowMs) : null,
   };
+}
+
+async function fetchJson(url: string, fetchImpl: FetchImpl): Promise<any> {
+  const resp = await fetchImpl(url);
+  if (!resp.ok) throw new Error(`upstream ${resp.status}`);
+  return resp.json();
+}
+
+export async function fetchWeather(
+  icao: string,
+  fetchImpl: FetchImpl = fetch,
+  nowMs: number = Date.now(),
+): Promise<ProviderResult<WeatherCore>> {
+  const code = icao.toUpperCase();
+  const metarUrl = `https://aviationweather.gov/api/data/metar?ids=${encodeURIComponent(code)}&format=json`;
+  const tafUrl = `https://aviationweather.gov/api/data/taf?ids=${encodeURIComponent(code)}&format=json`;
+
+  let metarJson: any;
+  try {
+    metarJson = await fetchJson(metarUrl, fetchImpl);
+  } catch (err) {
+    recordError('weather', err instanceof Error ? err.message : 'error', nowMs);
+    return { ok: false, reason: 'error', message: 'metar fetch failed' };
+  }
+
+  let tafRaw: string | null = null;
+  try {
+    const tafJson = await fetchJson(tafUrl, fetchImpl);
+    tafRaw = Array.isArray(tafJson) ? tafJson[0]?.rawTAF ?? null : null;
+  } catch {
+    // TAF is optional; keep METAR result.
+    tafRaw = null;
+  }
+
+  const metar = Array.isArray(metarJson) ? metarJson[0] : null;
+  if (!metar && !tafRaw) {
+    recordSuccess('weather', nowMs);
+    return { ok: false, reason: 'no_match' };
+  }
+
+  recordSuccess('weather', nowMs);
+  return { ok: true, data: mapWeather(code, metar, tafRaw, nowMs) };
 }

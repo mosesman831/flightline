@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import {
   ArrowLeft,
   Sun,
@@ -13,74 +13,19 @@ import {
   Info,
   GithubLogo,
   Monitor,
-  Key,
   Plugs,
-  Link,
-  Warning,
-  CheckCircle,
-  ArrowsClockwise,
-  Eye,
-  EyeSlash,
-  CaretDown,
   ShieldCheck,
+  Bell,
 } from '@phosphor-icons/react';
 import { exportFlights, importFlights, notifyFlightsChanged } from '../store/flightStore';
 import type { Flight } from '../types/flight';
 import { del, keys, createStore } from 'idb-keyval';
-
-// ─── Exported helpers ────────────────────────────────────────────────
-export function getApiKeys(): {
-  aviationstack?: string;
-  airlabs?: string;
-  flightapi?: string;
-} {
-  return {
-    aviationstack:
-      localStorage.getItem('flightline-key-aviationstack') || undefined,
-    airlabs: localStorage.getItem('flightline-key-airlabs') || undefined,
-    flightapi: localStorage.getItem('flightline-key-flightapi') || undefined,
-  };
-}
-
-export function getWorkerUrl(): string {
-  return (
-    localStorage.getItem('flightline-worker-url') || 'http://localhost:8787'
-  );
-}
-
-// ─── Provider config ─────────────────────────────────────────────────
-interface ProviderConfig {
-  id: string;
-  label: string;
-  localStorageKey: string;
-  tier: string;
-  description: string;
-}
-
-const PROVIDERS: ProviderConfig[] = [
-  {
-    id: 'aviationstack',
-    label: 'Aviationstack',
-    localStorageKey: 'flightline-key-aviationstack',
-    tier: '100 req/mo free — Gates, terminals, airline codes',
-    description: 'Real-time flight status, gates, terminals, and airline codes.',
-  },
-  {
-    id: 'airlabs',
-    label: 'AirLabs',
-    localStorageKey: 'flightline-key-airlabs',
-    tier: '1,000 req/mo free — Flight status, airports, airlines, fleet',
-    description:
-      'Flight status, airport info, airline data, and fleet details.',
-  },
-  {
-    id: 'flightapi',
-    label: 'FlightAPI.io',
-    localStorageKey: 'flightline-key-flightapi',
-    tier: '20 req/mo free — Flight pricing, schedules',
-    description: 'Flight pricing, schedules, and fare information.',
-  },
-];
+import { loadPrefs, savePrefs, type NotificationPrefs } from '../utils/notificationPrefs';
+import {
+  requestNotificationPermission,
+  sendLocalNotification,
+} from '../utils/notifications';
+import { fetchProviders, type ProviderReport } from '../utils/api';
 
 // ─── Types ───────────────────────────────────────────────────────────
 interface SettingsProps {
@@ -91,6 +36,39 @@ interface SettingsProps {
 }
 
 type ThemeMode = 'system' | 'light' | 'dark';
+
+// ─── Notification alert descriptors ──────────────────────────────────
+const ALERT_TYPES: {
+  key: keyof Omit<NotificationPrefs, 'master' | 'transitMinutes'>;
+  label: string;
+  description: string;
+}[] = [
+  {
+    key: 'leaveForAirport',
+    label: 'Leave for airport',
+    description: 'A reminder when it is time to head to the airport.',
+  },
+  {
+    key: 'boarding',
+    label: 'Boarding soon',
+    description: 'A heads-up shortly before boarding begins.',
+  },
+  {
+    key: 'gateChange',
+    label: 'Gate changes',
+    description: 'Alerts you the moment your departure gate changes.',
+  },
+  {
+    key: 'inboundLate',
+    label: 'Inbound aircraft late',
+    description: 'When the aircraft flying your route is running behind.',
+  },
+  {
+    key: 'statusChange',
+    label: 'Status changes',
+    description: 'Delays, cancellations, and diversions to your flight.',
+  },
+];
 
 const flightStore = createStore('flightline-db', 'flights');
 
@@ -121,28 +99,12 @@ export default function Settings({
   const [showClearConfirm, setShowClearConfirm] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
-  // Data Providers state
-  const [workerUrl, setWorkerUrl] = useState(() => getWorkerUrl());
-  const [expandedProvider, setExpandedProvider] = useState<string | null>(null);
-  const [providerKeys, setProviderKeys] = useState<Record<string, string>>(
-    () => {
-      const keys: Record<string, string> = {};
-      for (const p of PROVIDERS) {
-        keys[p.id] = localStorage.getItem(p.localStorageKey) || '';
-      }
-      return keys;
-    }
-  );
-  const [showKey, setShowKey] = useState<Record<string, boolean>>({});
-  const [testStatus, setTestStatus] = useState<
-    Record<string, 'idle' | 'loading' | 'success' | 'error'>
-  >(() => {
-    const s: Record<string, 'idle' | 'loading' | 'success' | 'error'> = {};
-    for (const p of PROVIDERS) {
-      s[p.id] = localStorage.getItem(p.localStorageKey) ? 'idle' : 'idle';
-    }
-    return s;
-  });
+  // Data Providers readiness (read-only; keys live on the Worker).
+  const [providers, setProviders] = useState<ProviderReport[] | null>(null);
+
+  // Notification preferences (SPEC §12.3c / §12.5a-b).
+  const [prefs, setPrefs] = useState<NotificationPrefs>(() => loadPrefs());
+  const [permissionDenied, setPermissionDenied] = useState(false);
 
   const demoCount = flights.filter((f) => f.isDemo).length;
   const activeCount = flights.filter((f) => !f.archived).length;
@@ -160,6 +122,17 @@ export default function Settings({
     mq.addEventListener('change', handleChange);
     return () => mq.removeEventListener('change', handleChange);
   }, [themeMode, setDarkMode]);
+
+  // Load read-only provider readiness on mount.
+  useEffect(() => {
+    let cancelled = false;
+    fetchProviders().then((report) => {
+      if (!cancelled) setProviders(report);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   function applyThemeMode(mode: ThemeMode) {
     setThemeMode(mode);
@@ -239,62 +212,51 @@ export default function Settings({
     }
   }
 
-  // ─── Provider helpers ────────────────────────────────────────────
-  function saveProviderKey(id: string, value: string) {
-    setProviderKeys((prev) => ({ ...prev, [id]: value }));
-    const cfg = PROVIDERS.find((p) => p.id === id);
-    if (cfg) {
-      if (value) {
-        localStorage.setItem(cfg.localStorageKey, value);
-      } else {
-        localStorage.removeItem(cfg.localStorageKey);
-      }
-    }
+  // ─── Notification pref helpers ───────────────────────────────────
+  function updatePrefs(next: NotificationPrefs) {
+    setPrefs(next);
+    savePrefs(next);
+    // Let the app rebuild its notification timers.
+    window.dispatchEvent(new Event('flightline-prefs-changed'));
   }
 
-  function saveWorkerUrl(value: string) {
-    setWorkerUrl(value);
-    if (value) {
-      localStorage.setItem('flightline-worker-url', value);
+  async function toggleMaster() {
+    if (prefs.master) {
+      updatePrefs({ ...prefs, master: false });
+      return;
+    }
+    const granted = await requestNotificationPermission();
+    if (granted) {
+      setPermissionDenied(false);
+      updatePrefs({ ...prefs, master: true });
     } else {
-      localStorage.removeItem('flightline-worker-url');
+      setPermissionDenied(true);
     }
   }
 
-  const testConnection = useCallback(
-    async (provider: ProviderConfig) => {
-      const apiKey = providerKeys[provider.id];
-      if (!apiKey) {
-        showStatus(`Enter an API key for ${provider.label} first`);
-        return;
-      }
-      setTestStatus((prev) => ({ ...prev, [provider.id]: 'loading' }));
-      try {
-        const url = `${workerUrl.replace(/\/$/, '')}/api/providers?provider=${provider.id}`;
-        const res = await fetch(url, {
-          headers: { 'X-API-Key': apiKey },
-        });
-        if (res.ok) {
-          setTestStatus((prev) => ({ ...prev, [provider.id]: 'success' }));
-          showStatus(`${provider.label} connected`);
-        } else {
-          setTestStatus((prev) => ({ ...prev, [provider.id]: 'error' }));
-          showStatus(`${provider.label} — connection failed (${res.status})`);
-        }
-      } catch {
-        setTestStatus((prev) => ({ ...prev, [provider.id]: 'error' }));
-        showStatus(`${provider.label} — unreachable`);
-      }
-    },
-    [providerKeys, workerUrl]
-  );
-
-  function toggleProviderExpand(id: string) {
-    setExpandedProvider((prev) => (prev === id ? null : id));
+  function toggleAlert(
+    key: keyof Omit<NotificationPrefs, 'master' | 'transitMinutes'>
+  ) {
+    updatePrefs({ ...prefs, [key]: !prefs[key] });
   }
 
-  function toggleShowKey(id: string) {
-    setShowKey((prev) => ({ ...prev, [id]: !prev[id] }));
+  function setTransitMinutes(value: number) {
+    const clamped = Math.max(0, Math.min(240, Math.round(value || 0)));
+    updatePrefs({ ...prefs, transitMinutes: clamped });
+  }
+
+  async function handlePreview() {
+    const granted =
+      'Notification' in window && Notification.permission === 'granted';
+    if (!granted) {
+      showStatus('Enable notifications first to preview');
+      return;
+    }
+    await sendLocalNotification('Gate changed', {
+      body: 'BA178 now departs from gate B12',
+      tag: 'flightline-preview',
+    });
+    showStatus('Preview notification sent');
   }
 
   return (
@@ -385,169 +347,70 @@ export default function Settings({
         </button>
       </div>
 
-      {/* ─── Data Providers ──────────────────────────────────────── */}
+      {/* ─── Data Providers (read-only readiness) ────────────────── */}
       <div className="card p-5 mb-4">
-        <SettingsSection
-          icon={<Plugs size={16} />}
-          label="Data Providers"
-        />
+        <SettingsSection icon={<Plugs size={16} />} label="Data Providers" />
 
-        {/* Worker URL */}
-        <div className="px-4 mb-4">
-          <label className="flex items-center gap-2 text-xs font-medium text-[var(--text-secondary)] mb-1.5">
-            <Link size={12} />
-            Worker URL
-          </label>
-          <input
-            type="url"
-            value={workerUrl}
-            onChange={(e) => saveWorkerUrl(e.target.value)}
-            placeholder="https://flightline-api.YOUR_SUBDOMAIN.workers.dev"
-            className="w-full px-3 py-2.5 rounded-xl bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm border border-[var(--border-color)] focus:outline-none focus:border-[#007AFF] transition-colors font-mono"
-          />
-        </div>
-
-        {/* Provider cards */}
-        <div className="space-y-2 px-4">
-          {PROVIDERS.map((provider) => {
-            const isExpanded = expandedProvider === provider.id;
-            const hasKey = !!providerKeys[provider.id];
-            const status = testStatus[provider.id];
-
-            return (
-              <div
-                key={provider.id}
-                className="rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-color)] overflow-hidden transition-all duration-200"
-              >
-                {/* Provider header (always visible) */}
-                <button
-                  onClick={() => toggleProviderExpand(provider.id)}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-[var(--bg-tertiary)] transition-colors"
-                >
-                  {/* Status dot */}
+        <div className="px-4">
+          {providers === null ? (
+            <p className="text-sm text-[var(--text-secondary)] py-2">
+              Checking providers…
+            </p>
+          ) : providers.length === 0 ? (
+            <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-color)]">
+              <div className="w-2.5 h-2.5 rounded-full bg-[var(--text-tertiary)] shrink-0" />
+              <p className="text-sm text-[var(--text-secondary)]">
+                Worker unreachable
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {providers.map((provider) => {
+                const dotClass = !provider.configured
+                  ? 'bg-[var(--text-tertiary)]'
+                  : provider.lastOutcome === 'ok'
+                    ? 'bg-green-500'
+                    : provider.lastOutcome === 'error'
+                      ? 'bg-rose-500'
+                      : 'bg-[#007AFF]';
+                const label = !provider.configured
+                  ? 'Not configured'
+                  : provider.lastOutcome === 'ok'
+                    ? 'Connected'
+                    : provider.lastOutcome === 'error'
+                      ? 'Error'
+                      : 'Ready';
+                return (
                   <div
-                    className={`w-2.5 h-2.5 rounded-full shrink-0 transition-colors ${
-                      hasKey
-                        ? status === 'success'
-                          ? 'bg-green-500'
-                          : status === 'error'
-                            ? 'bg-rose-500'
-                            : 'bg-[#007AFF]'
-                        : 'bg-[var(--text-tertiary)]'
-                    }`}
-                  />
-
-                  {/* Label + tier */}
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-semibold text-[var(--text-primary)]">
-                      {provider.label}
-                    </div>
-                    <div className="text-xs text-[var(--text-secondary)] truncate">
-                      {provider.tier}
+                    key={provider.key}
+                    className="flex items-start gap-3 px-4 py-3 rounded-2xl bg-[var(--bg-secondary)] border border-[var(--border-color)]"
+                  >
+                    <div
+                      className={`w-2.5 h-2.5 rounded-full shrink-0 mt-1.5 ${dotClass}`}
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-[var(--text-primary)]">
+                          {provider.name}
+                        </span>
+                        <span className="text-xs font-medium text-[var(--text-secondary)] shrink-0">
+                          {label}
+                        </span>
+                      </div>
+                      <p className="text-xs text-[var(--text-secondary)] leading-relaxed mt-0.5">
+                        {provider.data}
+                      </p>
+                      {provider.lastOutcome === 'error' && provider.lastError && (
+                        <p className="text-xs text-rose-500 leading-relaxed mt-0.5">
+                          {provider.lastError}
+                        </p>
+                      )}
                     </div>
                   </div>
-
-                  {/* Expand arrow */}
-                  <CaretDown
-                    size={14}
-                    className={`text-[var(--text-secondary)] transition-transform duration-200 shrink-0 ${
-                      isExpanded ? 'rotate-180' : ''
-                    }`}
-                  />
-                </button>
-
-                {/* Expanded content */}
-                <AnimatePresence>
-                  {isExpanded && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: 'auto', opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      transition={{ duration: 0.2, ease: 'easeInOut' }}
-                      className="overflow-hidden"
-                    >
-                      <div className="px-4 pb-4 space-y-3">
-                        {/* Description */}
-                        <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
-                          {provider.description}
-                        </p>
-
-                        {/* API Key input */}
-                        <div>
-                          <label className="flex items-center gap-2 text-xs font-medium text-[var(--text-secondary)] mb-1.5">
-                            <Key size={12} />
-                            API Key
-                          </label>
-                          <div className="relative">
-                            <input
-                              type={showKey[provider.id] ? 'text' : 'password'}
-                              value={providerKeys[provider.id]}
-                              onChange={(e) =>
-                                saveProviderKey(provider.id, e.target.value)
-                              }
-                              placeholder={`Enter your ${provider.label} API key`}
-                              className="w-full px-3 py-2.5 pr-10 rounded-xl bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm border border-[var(--border-color)] focus:outline-none focus:border-[#007AFF] transition-colors font-mono placeholder:font-sans"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => toggleShowKey(provider.id)}
-                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
-                              aria-label={
-                                showKey[provider.id]
-                                  ? 'Hide API key'
-                                  : 'Show API key'
-                              }
-                            >
-                              {showKey[provider.id] ? (
-                                <EyeSlash size={16} />
-                              ) : (
-                                <Eye size={16} />
-                              )}
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Test Connection button */}
-                        <button
-                          onClick={() => testConnection(provider)}
-                          disabled={
-                            !providerKeys[provider.id] ||
-                            testStatus[provider.id] === 'loading'
-                          }
-                          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm font-medium hover:bg-[var(--border-color)] active:scale-[0.98] transition-all disabled:opacity-40 disabled:cursor-not-allowed"
-                        >
-                          {testStatus[provider.id] === 'loading' ? (
-                            <>
-                              <ArrowsClockwise
-                                size={14}
-                                className="animate-spin"
-                              />
-                              Testing…
-                            </>
-                          ) : testStatus[provider.id] === 'success' ? (
-                            <>
-                              <CheckCircle size={14} className="text-green-500" />
-                              Connected
-                            </>
-                          ) : testStatus[provider.id] === 'error' ? (
-                            <>
-                              <Warning size={14} className="text-rose-500" />
-                              Retry
-                            </>
-                          ) : (
-                            <>
-                              <Plugs size={14} />
-                              Test Connection
-                            </>
-                          )}
-                        </button>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            );
-          })}
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Privacy note */}
@@ -557,10 +420,131 @@ export default function Settings({
             className="text-[var(--text-secondary)] mt-0.5 shrink-0"
           />
           <p className="text-[11px] leading-relaxed text-[var(--text-secondary)]">
-            These keys are stored locally on your device and sent to the
-            Flightline proxy worker. They are never shared with third parties.
+            Provider API keys are configured on the Worker (server-side), not in
+            the browser.
           </p>
         </div>
+      </div>
+
+      {/* ─── Notifications ───────────────────────────────────────── */}
+      <div className="card p-5 mb-4">
+        <SettingsSection icon={<Bell size={16} />} label="Notifications" />
+
+        {/* Master toggle */}
+        <button
+          onClick={toggleMaster}
+          className="w-full flex items-center justify-between px-4 py-3 rounded-2xl hover:bg-[var(--bg-tertiary)] transition-colors"
+          aria-label="Toggle notifications"
+          aria-pressed={prefs.master}
+        >
+          <span className="text-sm font-medium text-[var(--text-primary)]">
+            Notifications
+          </span>
+          <div
+            className={`relative h-7 w-11 rounded-full transition-colors duration-200 ${
+              prefs.master ? 'bg-[#007AFF]' : 'bg-[var(--text-tertiary)]'
+            }`}
+          >
+            <div
+              className={`absolute top-0.5 left-0.5 h-6 w-6 rounded-full bg-white shadow transition-transform duration-200 ${
+                prefs.master ? 'translate-x-4' : 'translate-x-0'
+              }`}
+            />
+          </div>
+        </button>
+
+        {/* iOS permission-denied hint */}
+        {permissionDenied && !prefs.master && (
+          <p className="mx-4 mt-2 text-xs text-rose-500 leading-relaxed">
+            Enable notifications for Flightline in iOS Settings › Notifications.
+          </p>
+        )}
+
+        {!prefs.master && (
+          <p className="mx-4 mt-2 text-xs text-[var(--text-tertiary)] leading-relaxed">
+            Turn on notifications to get timely alerts for your tracked flights.
+          </p>
+        )}
+
+        {/* Per-alert toggles */}
+        {prefs.master && (
+          <div className="mt-2 space-y-1">
+            {ALERT_TYPES.map(({ key, label, description }) => (
+              <button
+                key={key}
+                onClick={() => toggleAlert(key)}
+                className="w-full flex items-center justify-between gap-3 px-4 py-2.5 rounded-2xl hover:bg-[var(--bg-tertiary)] transition-colors text-left"
+                aria-label={`Toggle ${label}`}
+                aria-pressed={prefs[key]}
+              >
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-[var(--text-primary)]">
+                    {label}
+                  </div>
+                  <div className="text-xs text-[var(--text-tertiary)]">
+                    {description}
+                  </div>
+                </div>
+                <div
+                  className={`relative h-6 w-10 rounded-full shrink-0 transition-colors duration-200 ${
+                    prefs[key] ? 'bg-[#007AFF]' : 'bg-[var(--bg-tertiary)]'
+                  }`}
+                >
+                  <div
+                    className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform duration-200 ${
+                      prefs[key] ? 'translate-x-4' : 'translate-x-0'
+                    }`}
+                  />
+                </div>
+              </button>
+            ))}
+
+            {/* Transit time */}
+            <div className="px-4 pt-3">
+              <label
+                htmlFor="transit-minutes"
+                className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5"
+              >
+                Transit time to airport (minutes)
+              </label>
+              <input
+                id="transit-minutes"
+                type="number"
+                min={0}
+                max={240}
+                value={prefs.transitMinutes}
+                onChange={(e) => setTransitMinutes(Number(e.target.value))}
+                className="w-full px-3 py-2.5 rounded-xl bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm border border-[var(--border-color)] focus:outline-none focus:border-[#007AFF] transition-colors tabular-nums"
+              />
+            </div>
+
+            {/* Preview */}
+            <div className="px-4 pt-3 space-y-2">
+              <div className="flex items-start gap-3 px-3 py-2.5 rounded-xl bg-[var(--bg-secondary)] border border-[var(--border-color)]">
+                <Bell
+                  size={16}
+                  className="text-[#007AFF] mt-0.5 shrink-0"
+                  weight="fill"
+                />
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-[var(--text-primary)]">
+                    Gate changed
+                  </div>
+                  <div className="text-xs text-[var(--text-secondary)]">
+                    BA178 now departs from gate B12
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={handlePreview}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-[var(--bg-tertiary)] text-[var(--text-primary)] text-sm font-medium hover:bg-[var(--border-color)] active:scale-[0.98] transition-all"
+              >
+                <Bell size={14} />
+                Preview
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Stats */}

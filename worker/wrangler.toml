@@ -1,3 +1,11 @@
 name = "flightline-api"
 main = "src/index.ts"
-compatibility_date = "2024-01-01"
+compatibility_date = "2025-06-01"
+
+# Non-secret configuration. Provider API keys are NOT stored here — set them as
+# secrets (wrangler secret put AVIATIONSTACK_API_KEY / AIRLABS_API_KEY) or in
+# .dev.vars locally (see .dev.vars.example).
+[vars]
+PAGES_ORIGIN = "https://flightline.pages.dev"
+DEV_ORIGIN = "http://localhost:5173"
+ENVIRONMENT = "development"

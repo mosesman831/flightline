@@ -1,76 +1,202 @@
-// API keys config
+// Shared types for the Flightline Worker (Days 1-3 sprint contract)
+
+// Worker environment bindings.
+// Secrets: AVIATIONSTACK_API_KEY, AIRLABS_API_KEY
+// Vars: PAGES_ORIGIN, DEV_ORIGIN (local only), ENVIRONMENT
+export interface Env {
+  AVIATIONSTACK_API_KEY?: string;
+  AIRLABS_API_KEY?: string;
+  PAGES_ORIGIN?: string;
+  DEV_ORIGIN?: string;
+  ENVIRONMENT?: string;
+}
+
 export interface ApiKeys {
   aviationstack?: string;
   airlabs?: string;
-  flightapi?: string;
 }
 
-// Normalized flight status from any provider
-export interface NormalizedFlightStatus {
+// Normalized flight status union shared with the frontend.
+export type FlightStatus =
+  | 'scheduled'
+  | 'boarding'
+  | 'active'
+  | 'landed'
+  | 'delayed'
+  | 'cancelled'
+  | 'diverted';
+
+export interface NormalizedAirport {
+  iata: string;
+  icao: string;
+  name: string;
+}
+
+// A normalized live ADS-B position. Units are normalized:
+//   altitudeFt (feet), groundSpeedKt (knots), verticalRateFpm (feet/min).
+export interface LivePosition {
+  icao24: string;
+  callsign: string | null;
+  latitude: number;
+  longitude: number;
+  altitudeFt: number | null;
+  groundSpeedKt: number | null;
+  heading: number | null;
+  verticalRateFpm: number | null;
+  onGround: boolean;
+  observedAt: string; // absolute ISO 8601
+  stale: boolean; // true when the observation is older than 60s
+  source: 'adsb.lol' | 'opensky';
+}
+
+// The schedule/status base a schedule provider produces (pre-envelope).
+export interface FlightBase {
+  iataNumber: string;
   flightNumber: string;
   airlineIata: string;
   airlineName: string;
-  origin: { iata: string; icao: string; name: string };
-  destination: { iata: string; icao: string; name: string };
+  flightIcao: string | null; // operational callsign candidate, e.g. BAW178
+  origin: NormalizedAirport;
+  destination: NormalizedAirport;
   scheduledDeparture: string | null;
   scheduledArrival: string | null;
   estimatedDeparture: string | null;
   estimatedArrival: string | null;
   actualDeparture: string | null;
   actualArrival: string | null;
-  status: string;
+  localDepartureDate: string | null; // YYYY-MM-DD in the origin's local time
+  status: FlightStatus;
   delayMinutes: number | null;
   gate: string | null;
   terminal: string | null;
   aircraft: string | null;
-  tailNumber: string | null;
+  registration: string | null;
+  icao24: string | null;
   codeshare: string | null;
-  dataSources: string[]; // which providers contributed
+  statusSource: string;
+}
+
+// The full normalized flight snapshot returned by /api/track and /api/flight.
+export interface NormalizedFlight {
+  requestId: string;
   fetchedAt: string;
+  dataSources: string[];
+  stale: boolean;
+  canonicalKey: string; // YYYY-MM-DD:IATA_NUMBER
+  serviceDate: string; // YYYY-MM-DD
+  iataNumber: string; // BA178
+  flightNumber: string; // 178
+  airlineIata: string;
+  airlineName: string;
+  origin: NormalizedAirport;
+  destination: NormalizedAirport;
+  scheduledDeparture: string | null;
+  scheduledArrival: string | null;
+  estimatedDeparture: string | null;
+  estimatedArrival: string | null;
+  actualDeparture: string | null;
+  actualArrival: string | null;
+  status: FlightStatus;
+  delayMinutes: number | null;
+  gate: string | null;
+  terminal: string | null;
+  aircraft: string | null;
+  registration: string | null;
+  codeshare: string | null;
+  statusSource: string | null;
+  positionSource: string | null;
+  livePosition: LivePosition | null;
 }
 
-// Live ADS-B position
-export interface LivePosition {
-  icao24: string;
-  callsign: string;
-  originCountry: string;
-  latitude: number;
-  longitude: number;
-  altitude: number | null;
-  velocity: number | null;
-  heading: number | null;
-  verticalRate: number | null;
-  onGround: boolean;
-  lastContact: number;
-}
-
-// Weather observation
+// Normalized METAR/TAF weather.
 export interface WeatherData {
-  airport: string;
+  requestId: string;
+  fetchedAt: string;
+  dataSources: string[];
+  stale: boolean;
+  airport: string; // ICAO
   metar: string | null;
   taf: string | null;
-  windSpeed: number | null;
-  windGust: number | null;
-  visibility: number | null;
-  temperature: number | null;
-  condition: string;
+  windSpeedKts: number | null;
+  windGustKts: number | null;
+  visibilityKm: number | null;
+  temperatureC: number | null;
+  observedAt: string | null;
+}
+
+// The inbound-rotation core an inbound provider produces (pre-envelope). This is
+// the prior leg an aircraft flew in on, derived from OpenSky flights-by-aircraft.
+export interface InboundLegCore {
+  flightIata: string | null; // callsign, trimmed
+  originIcao: string | null; // estDepartureAirport
+  originIata: null;
+  destinationIcao: string | null; // estArrivalAirport
+  scheduledArrival: null;
+  arrivalEstimated: null;
+  arrivalActual: string | null; // absolute ISO 8601, from lastSeen
+  icao24: string;
+  tail: null;
+  source: 'opensky';
+}
+
+// The full inbound-rotation response returned by /api/inbound (adds envelope).
+export interface InboundResponse extends InboundLegCore {
+  requestId: string;
   fetchedAt: string;
+  dataSources: string[];
+  stale: boolean;
+  found: true;
 }
 
-// Provider health status
-export interface ProviderStatus {
+// FAA National Airspace System advisory types for a single airport.
+export type NasEventType = 'ground_stop' | 'ground_delay' | 'closure' | 'delay';
+
+export interface NasEvent {
+  type: NasEventType;
+  reason: string | null;
+  avgDelayMinutes: number | null;
+  scope: string | null;
+  endTime: string | null; // absolute ISO 8601 when parseable, else null
+}
+
+// The NAS-status core a FAA provider produces (pre-envelope).
+export interface NasStatusCore {
+  airport: string; // IATA, upper
+  hasIssues: boolean;
+  events: NasEvent[];
+}
+
+// The full NAS-status response returned by /api/nas (adds envelope).
+export interface NasStatusResponse extends NasStatusCore {
+  requestId: string;
+  fetchedAt: string;
+  dataSources: string[];
+  stale: boolean;
+  source: 'faa';
+}
+
+// Provider readiness reporting for /api/providers.
+export interface ProviderReport {
   name: string;
-  enabled: boolean;
-  healthy: boolean;
-  requestsUsed: number;
-  requestsLimit: number;
+  key: string;
+  configured: boolean;
+  requiresKey: boolean;
+  lastOutcome: 'ok' | 'error' | 'unknown';
   lastError: string | null;
-  lastChecked: string;
+  lastCheckedAt: string | null;
+  data: string;
 }
 
-// Cache entry wrapper
-export interface CacheEntry<T> {
-  data: T;
-  cachedAt: number;
-  ttl: number;
-}
+// Discriminated result returned by every provider adapter so the fallback
+// chain can reason deterministically about why a provider did not produce data.
+export type ProviderFailureReason =
+  | 'unconfigured'
+  | 'no_match'
+  | 'rate_limited'
+  | 'auth'
+  | 'unusable'
+  | 'error';
+
+export type ProviderResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; reason: ProviderFailureReason; message?: string };
