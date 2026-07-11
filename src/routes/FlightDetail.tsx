@@ -24,11 +24,12 @@ import {
   Eye,
   Thermometer,
 } from '@phosphor-icons/react';
-import { toPng } from 'html-to-image';
 import type { Flight, LivePosition } from '../types/flight';
 import { greatCircleKm } from '../utils/geo';
 import { refreshFlight, refreshPosition, POSITION_INTERVAL_MS } from '../utils/refresh';
 import { fetchWeather, type ApiWeather } from '../utils/api';
+import { shareFlightCard } from '../utils/shareFlight';
+import { useOnlineStatus } from '../utils/useOnlineStatus';
 import AirlineLogo from '../components/AirlineLogo';
 import StatusPill from '../components/StatusPill';
 import Countdown from '../components/Countdown';
@@ -43,6 +44,7 @@ import ArrivalForecast from '../components/ArrivalForecast';
 import AircraftCard from '../components/AircraftCard';
 import RulesAndBaggage from '../components/RulesAndBaggage';
 import DisruptionAlert from '../components/DisruptionAlert';
+import ShareCard from '../components/ShareCard';
 
 interface FlightDetailProps {
   flights: Flight[];
@@ -93,20 +95,24 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
   const [flight, setFlight] = useState<Flight | undefined>(() => flights.find((f) => f.id === id));
   const [seeMore, setSeeMore] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [shareNote, setShareNote] = useState<string | null>(null);
   const [refreshState, setRefreshState] = useState<'idle' | 'refreshing' | 'fresh' | 'stale' | 'failed'>('idle');
   const [originWeather, setOriginWeather] = useState<ApiWeather | null>(null);
   const [destWeather, setDestWeather] = useState<ApiWeather | null>(null);
-  const shareRef = useRef<HTMLDivElement>(null);
+  const online = useOnlineStatus();
+  const shareCardRef = useRef<HTMLDivElement>(null);
+  const shareNoteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setFlight(flights.find((f) => f.id === id));
   }, [flights, id]);
 
-  // Clear any pending refresh-outcome reset on unmount.
+  // Clear any pending refresh-outcome / share-note reset on unmount.
   useEffect(() => {
     return () => {
       if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+      if (shareNoteTimeoutRef.current) clearTimeout(shareNoteTimeoutRef.current);
     };
   }, []);
 
@@ -257,31 +263,24 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
   const isActive = flight.status === 'scheduled' || flight.status === 'boarding' || flight.status === 'active';
 
   async function handleShare() {
-    if (sharing || !shareRef.current || !flight) return;
+    if (sharing || !shareCardRef.current || !flight) return;
     setSharing(true);
     try {
-      const dataUrl = await toPng(shareRef.current, {
-        backgroundColor: '#FAFAF8',
-        pixelRatio: 2,
-      });
-      const blob = await (await fetch(dataUrl)).blob();
-      const file = new File([blob], `flight-${flight.flightNumber}.png`, { type: 'image/png' });
-
-      if (navigator.share && navigator.canShare?.({ files: [file] })) {
-        await navigator.share({
-          title: `${flight.airlineIata} ${flight.flightNumber} - Flightline`,
-          text: `${flight.airlineName} ${flight.flightNumber} — ${flight.origin.iata} → ${flight.destination.iata}`,
-          files: [file],
-        });
-      } else {
-        // Fallback: download the image
-        const link = document.createElement('a');
-        link.download = `flight-${flight.flightNumber}.png`;
-        link.href = dataUrl;
-        link.click();
+      const result = await shareFlightCard(shareCardRef.current, flight);
+      const note =
+        result === 'downloaded' ? 'Saved image' :
+        result === 'shared-text' ? 'Shared link' :
+        result === 'shared-file' ? 'Shared image' : null;
+      if (note) {
+        setShareNote(note);
+        if (shareNoteTimeoutRef.current) clearTimeout(shareNoteTimeoutRef.current);
+        shareNoteTimeoutRef.current = setTimeout(() => {
+          setShareNote(null);
+          shareNoteTimeoutRef.current = null;
+        }, 2500);
       }
     } catch {
-      // User cancelled share or error
+      // Capture/share failed
     } finally {
       setSharing(false);
     }
@@ -313,6 +312,25 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
       transition={{ duration: 0.28 }}
       className="max-w-lg mx-auto"
     >
+      {/* Hidden, off-screen capture card fed to the share pipeline. */}
+      <div
+        aria-hidden
+        style={{ position: 'fixed', left: '-9999px', top: 0, pointerEvents: 'none' }}
+      >
+        <ShareCard ref={shareCardRef} flight={flight} />
+      </div>
+
+      {/* Share outcome toast */}
+      {shareNote && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed left-1/2 -translate-x-1/2 bottom-6 z-50 px-4 py-2 rounded-full bg-[var(--text-primary)] text-[var(--bg-primary)] text-xs font-medium shadow-lg"
+        >
+          {shareNote}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-center gap-3 mb-4">
         <button
@@ -354,7 +372,7 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
       </div>
 
       {/* Hero Card */}
-      <div ref={shareRef} className="card p-6 mb-4">
+      <div className="card p-6 mb-4">
         <div className="flex items-center gap-3 mb-4">
           <AirlineLogo iata={flight.airlineIata} name={flight.airlineName} size={44} />
           <div>
@@ -675,15 +693,28 @@ export default function FlightDetail({ flights }: FlightDetailProps) {
           Where's My Plane
         </h3>
         <div className="rounded-xl overflow-hidden h-48 relative">
-          <FlightMap
-            originLat={flight.origin.lat}
-            originLon={flight.origin.lon}
-            destLat={flight.destination.lat}
-            destLon={flight.destination.lon}
-            originIata={flight.origin.iata}
-            destIata={flight.destination.iata}
-            position={flight.livePosition ?? null}
-          />
+          {online ? (
+            <FlightMap
+              originLat={flight.origin.lat}
+              originLon={flight.origin.lon}
+              destLat={flight.destination.lat}
+              destLon={flight.destination.lon}
+              originIata={flight.origin.iata}
+              destIata={flight.destination.iata}
+              position={flight.livePosition ?? null}
+            />
+          ) : (
+            <div className="w-full h-full flex flex-col items-center justify-center gap-3 bg-[var(--bg-tertiary)]">
+              <div className="flex items-center gap-2">
+                <span className="text-2xl font-bold text-[var(--text-primary)]">{flight.origin.iata}</span>
+                <span className="w-8 border-t-2 border-dashed border-[var(--text-tertiary)]" />
+                <AirplaneTilt size={20} weight="fill" className="text-[var(--text-tertiary)]" />
+                <span className="w-8 border-t-2 border-dashed border-[var(--text-tertiary)]" />
+                <span className="text-2xl font-bold text-[var(--text-primary)]">{flight.destination.iata}</span>
+              </div>
+              <span className="text-xs text-[var(--text-tertiary)]">Map unavailable offline</span>
+            </div>
+          )}
         </div>
       </div>
 

@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { addDemoFlightsIfEmpty, getAllFlights, subscribeFlights } from './store/flightStore';
 import { useFlightPolling } from './utils/useFlightPolling';
 import { refreshAllDue } from './utils/refresh';
+import { useOnlineStatus } from './utils/useOnlineStatus';
+import { rebuildNotificationTimers, clearAllTimers } from './utils/notificationScheduler';
+import { loadPrefs } from './utils/notificationPrefs';
 import type { Flight } from './types/flight';
+import OfflineBanner from './components/OfflineBanner';
 import Layout from './components/Layout';
 import FlightsList from './routes/FlightsList';
 import FlightDetail from './routes/FlightDetail';
@@ -67,6 +71,37 @@ export default function App() {
   // Visibility-aware live polling (per-flight cadence handled internally)
   useFlightPolling(activeFlights);
 
+  // Rebuild smart-notification timers whenever flights or preferences change.
+  useEffect(() => {
+    rebuildNotificationTimers({ flights: activeFlights, prefs: loadPrefs() });
+    const onPrefs = () => rebuildNotificationTimers({ flights: activeFlights, prefs: loadPrefs() });
+    window.addEventListener('flightline-prefs-changed', onPrefs);
+    return () => window.removeEventListener('flightline-prefs-changed', onPrefs);
+  }, [activeFlights]);
+
+  useEffect(() => () => clearAllTimers(), []);
+
+  // Offline / reconnect handling.
+  const online = useOnlineStatus();
+  const [justReconnected, setJustReconnected] = useState(false);
+  const [recoveredFresh, setRecoveredFresh] = useState(false);
+  const wasOnline = useRef(online);
+  useEffect(() => {
+    if (online && !wasOnline.current) {
+      // Just came back online: run one bounded refresh and surface the outcome.
+      setJustReconnected(true);
+      setRecoveredFresh(false);
+      void refreshAllDue({ force: true }).then(() => {
+        setRecoveredFresh(true);
+        loadFlights();
+      });
+      const t = setTimeout(() => setJustReconnected(false), 4000);
+      wasOnline.current = online;
+      return () => clearTimeout(t);
+    }
+    wasOnline.current = online;
+  }, [online]);
+
   // Global keyboard shortcuts
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -99,6 +134,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[var(--bg-primary)]">
+      <OfflineBanner online={online} justReconnected={justReconnected} recoveredFresh={recoveredFresh} />
       <Routes>
         <Route
           path="/"

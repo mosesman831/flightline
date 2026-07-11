@@ -6,13 +6,18 @@ export default defineConfig({
   plugins: [
     react(),
     VitePWA({
+      strategies: "injectManifest",
+      srcDir: "src",
+      filename: "sw.ts",
       registerType: "autoUpdate",
-      includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png"],
+      injectRegister: "auto",
+      includeAssets: ["favicon.svg", "icon-192.png", "icon-512.png", "icon-180.png"],
       manifest: {
         name: "Flightline",
         short_name: "Flightline",
         description: "Know before the gate does. Track flights, predict delays, and see the aircraft coming your way.",
-        start_url: "/",
+        scope: "/",
+        start_url: "/#/",
         display: "standalone",
         orientation: "portrait",
         background_color: "#FAFAF8",
@@ -23,28 +28,18 @@ export default defineConfig({
             src: "/icon-192.png",
             sizes: "192x192",
             type: "image/png",
-            purpose: "maskable",
+            purpose: "any maskable",
           },
           {
             src: "/icon-512.png",
             sizes: "512x512",
             type: "image/png",
-            purpose: "maskable",
+            purpose: "any maskable",
           },
         ],
       },
-      workbox: {
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,json}"],
-        runtimeCaching: [
-          {
-            urlPattern: /^https:\/\/www\.gstatic\.com\/flights\/.*/i,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "airline-logos",
-              expiration: { maxEntries: 50, maxAgeSeconds: 60 * 60 * 24 * 30 },
-            },
-          },
-        ],
+      injectManifest: {
+        globPatterns: ["**/*.{js,css,html,svg,png,ico,json}"],
       },
     }),
   ],
